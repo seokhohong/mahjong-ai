@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mahjong AI - Simple Jong</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Mahjong AI - Simple Jong</h1>
+            <div class="game-info">
+                <span id="game-id">Game ID: -</span>
+                <span id="remaining-tiles">Remaining: -</span>
+                <span id="current-player">Current Player: -</span>
+            </div>
+        </header>
+
+        <div class="game-controls">
+            <button id="new-game-btn" class="btn btn-primary">New Game</button>
+            <button id="tsumo-btn" class="btn btn-success" disabled>Declare Tsumo</button>
+        </div>
+
+        <div class="mahjong-table">
+            <!-- Top Player (Toimen - AI Player 2) -->
+            <div class="player-area top-player">
+                <div class="player-info">
+                    <div class="player-label">AI Player 2 (Toimen)</div>
+                    <div class="hand-size">Hand: <span id="ai-hand-2">-</span></div>
+                </div>
+                <div class="player-hand horizontal-hand">
+                    <div id="ai-hand-2-tiles" class="face-down-tiles horizontal"></div>
+                </div>
+                <div class="player-discards top-discards">
+                    <div id="ai-discards-2" class="discard-area"></div>
+                </div>
+            </div>
+
+            <!-- Left Player (Kamicha - AI Player 1) -->
+            <div class="player-area left-player">
+                <div class="player-info">
+                    <div class="player-label">AI Player 1 (Kamicha)</div>
+                    <div class="hand-size">Hand: <span id="ai-hand-1">-</span></div>
+                </div>
+                <div class="player-hand vertical-hand">
+                    <div id="ai-hand-1-tiles" class="face-down-tiles vertical"></div>
+                </div>
+                <div class="player-discards left-discards">
+                    <div id="ai-discards-1" class="discard-area"></div>
+                </div>
+            </div>
+
+            <!-- Right Player (Shimocha - AI Player 3) -->
+            <div class="player-area right-player">
+                <div class="player-info">
+                    <div class="player-label">AI Player 3 (Shimocha)</div>
+                    <div class="hand-size">Hand: <span id="ai-hand-3">-</span></div>
+                </div>
+                <div class="player-hand vertical-hand">
+                    <div id="ai-hand-3-tiles" class="face-down-tiles vertical"></div>
+                </div>
+                <div class="player-discards right-discards">
+                    <div id="ai-discards-3" class="discard-area"></div>
+                </div>
+            </div>
+
+            <!-- Bottom Player (Human) -->
+            <div class="player-area bottom-player">
+                <div class="player-info">
+                    <div class="player-label">You (Human)</div>
+                    <div class="hand-size">Hand: <span id="human-hand-size">-</span></div>
+                </div>
+                <div class="player-hand horizontal-hand">
+                    <div id="human-hand" class="tiles-container horizontal"></div>
+                </div>
+                <div class="player-discards bottom-discards">
+                    <div id="human-discards" class="discard-area"></div>
+                </div>
+            </div>
+
+            <!-- Center area -->
+            <div class="center-area">
+                <div class="table-center">
+                    <div class="remaining-tiles-info">
+                        <span id="remaining-tiles-display">Remaining: -</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="game-status">
+            <div id="status-message" class="status-message"></div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/game.js') }}"></script>
+</body>
+</html> 

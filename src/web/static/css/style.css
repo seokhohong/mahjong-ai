@@ -1,0 +1,551 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Arial', sans-serif;
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    min-height: 100vh;
+    color: #333;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+header {
+    text-align: center;
+    margin-bottom: 30px;
+    color: white;
+}
+
+header h1 {
+    font-size: 2.5em;
+    margin-bottom: 10px;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+}
+
+.game-info {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    font-size: 1.1em;
+}
+
+.game-info span {
+    background: rgba(255,255,255,0.1);
+    padding: 8px 16px;
+    border-radius: 20px;
+    backdrop-filter: blur(10px);
+}
+
+.game-controls {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.btn {
+    padding: 12px 24px;
+    margin: 0 10px;
+    border: none;
+    border-radius: 8px;
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background: linear-gradient(45deg, #4CAF50, #45a049);
+    color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+
+.btn-success {
+    background: linear-gradient(45deg, #f39c12, #e67e22);
+    color: white;
+}
+
+.btn-success:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+
+/* Mahjong Table Layout */
+.mahjong-table {
+    position: relative;
+    background: linear-gradient(135deg, #2d5a27, #1e3a1a);
+    border-radius: 20px;
+    padding: 40px;
+    margin-bottom: 30px;
+    box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+    min-height: 700px;
+    border: 8px solid #8b4513;
+    display: grid;
+    grid-template-areas: 
+        ". top-player ."
+        "left-player center-area right-player"
+        ". bottom-player .";
+    grid-template-columns: 1fr 2fr 1fr;
+    grid-template-rows: 1fr 2fr 1fr;
+    gap: 20px;
+}
+
+/* Player Areas */
+.player-area {
+    background: rgba(255,255,255,0.1);
+    border-radius: 15px;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    backdrop-filter: blur(10px);
+    border: 2px solid rgba(255,255,255,0.2);
+    position: relative;
+}
+
+.top-player {
+    grid-area: top-player;
+    align-items: center;
+}
+
+.left-player {
+    grid-area: left-player;
+    align-items: flex-start;
+}
+
+.right-player {
+    grid-area: right-player;
+    align-items: flex-end;
+}
+
+.bottom-player {
+    grid-area: bottom-player;
+    align-items: center;
+}
+
+.player-info {
+    text-align: center;
+    color: white;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.7);
+}
+
+.player-label {
+    font-weight: bold;
+    font-size: 1.1em;
+    margin-bottom: 5px;
+}
+
+.hand-size {
+    font-size: 0.9em;
+    opacity: 0.9;
+}
+
+/* Player hands */
+.player-hand, .tiles-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 80px;
+    position: relative;
+    flex-wrap: nowrap; /* Ensure tiles stay in a single line */
+    overflow: hidden; /* Hide any overflow */
+}
+
+.horizontal-hand {
+    flex-direction: row;
+    width: 100%;
+}
+
+
+.vertical-hand {
+    flex-direction: column;
+}
+
+/* Face-down tiles for AI players */
+.face-down-tiles {
+    display: flex;
+    gap: 4px;
+    justify-content: center;
+    align-items: center;
+    min-height: 70px;
+}
+
+.face-down-tiles.horizontal {
+    flex-direction: row;
+    flex-wrap: wrap;
+}
+
+.face-down-tiles.vertical {
+    flex-direction: column;
+    flex-wrap: nowrap; /* Prevent wrapping */
+}
+
+.face-down-tile {
+    width: 40px;
+    height: 56px;
+    background: linear-gradient(135deg, #8b4513, #a0522d);
+    border: 2px solid #654321;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    position: relative;
+    flex-shrink: 0;
+    flex-grow: 0; /* Prevent tiles from growing */
+}
+
+/* Rotations for AI players' face-down tiles */
+.top-player .face-down-tile {
+    transform: rotate(180deg);
+}
+
+.left-player .face-down-tile {
+    transform: rotate(90deg);
+    margin-top: -35px; /* Vertical overlap for rotated tiles */
+}
+
+.left-player .face-down-tile:first-child {
+    margin-top: 0; /* No overlap for first tile */
+}
+
+.right-player .face-down-tile {
+    transform: rotate(-90deg);
+    margin-top: -35px; /* Vertical overlap for rotated tiles */
+}
+
+.right-player .face-down-tile:first-child {
+    margin-top: 0; /* No overlap for first tile */
+}
+
+/* Rotations for AI players' winning hand tiles */
+.top-player .player-hand .tile {
+    transform: rotate(180deg);
+}
+
+.left-player .player-hand .tile {
+    transform: rotate(90deg);
+    margin-top: -35px; /* Vertical overlap for rotated tiles */
+}
+
+.left-player .player-hand .tile:first-child {
+    margin-top: 0; /* No overlap for first tile */
+}
+
+.right-player .player-hand .tile {
+    transform: rotate(-90deg);
+    margin-top: -35px; /* Vertical overlap for rotated tiles */
+}
+
+.right-player .player-hand .tile:first-child {
+    margin-top: 0; /* No overlap for first tile */
+}
+
+.face-down-tile::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    right: 2px;
+    bottom: 2px;
+    background: linear-gradient(135deg, #a0522d, #8b4513);
+    border-radius: 4px;
+    border: 1px solid #654321;
+}
+
+/* Discard areas - positioned towards the center */
+.player-discards {
+    position: absolute;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: center;
+    min-height: 60px;
+    padding: 10px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.2);
+    z-index: 10;
+}
+
+.top-discards {
+    bottom: -80px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 400px;
+}
+
+.bottom-discards {
+    top: -80px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 400px;
+}
+
+.left-discards {
+    right: -80px;
+    top: 50%;
+    transform: translateY(-50%);
+    flex-direction: column;
+}
+
+.right-discards {
+    left: -80px;
+    top: 50%;
+    transform: translateY(-50%);
+    flex-direction: column;
+}
+
+.discard-area {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: center;
+    align-items: center;
+}
+
+.left-discards .discard-area,
+.right-discards .discard-area {
+    flex-direction: column;
+}
+
+/* Center area */
+.center-area {
+    grid-area: center-area;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.05);
+    border-radius: 15px;
+    border: 2px solid rgba(255,255,255,0.1);
+}
+
+.table-center {
+    text-align: center;
+    color: white;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.7);
+}
+
+.remaining-tiles-info {
+    font-size: 1.2em;
+    font-weight: bold;
+}
+
+/* Tiles container for human player */
+.tiles-container {
+    gap: 4px; /* Reduced gap to fit more tiles */
+    justify-content: center;
+    align-items: center;
+    min-height: 80px;
+    flex-wrap: nowrap;
+    width: 100%;
+}
+
+.tiles-container.horizontal {
+    flex-direction: row;
+}
+
+.tiles-container.vertical {
+    flex-direction: column;
+}
+
+/* Mahjong Tile Styles */
+.tile {
+    width: 4vw; /* Use viewport width for responsive sizing */
+    max-width: 50px; /* Max size for larger screens */
+    min-width: 30px; /* Min size for smaller screens */
+    height: auto; /* Maintain aspect ratio */
+    aspect-ratio: 50 / 70; /* Maintain tile aspect ratio */
+    background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+    border: 2px solid #6c757d;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 1.2em;
+    color: #495057;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 1; /* Allow tiles to shrink */
+}
+
+.tile img {
+    width: 90%;
+    height: 90%;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+/* Newly drawn tile styling */
+.tile.newly-drawn {
+    background: linear-gradient(135deg, #fff3cd, #ffeaa7);
+    border: 3px solid #f39c12;
+    box-shadow: 0 4px 8px rgba(243, 156, 18, 0.3);
+    transform: translateY(-2px);
+    margin-left: 20px; /* Add significant spacing from the regular hand */
+    position: relative;
+}
+
+/* Add a visual separator before the newly drawn tile */
+.tile.newly-drawn::before {
+    content: '';
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2px;
+    height: 60%;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 1px;
+}
+
+.tile:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    border-color: #007bff;
+}
+
+.tile.newly-drawn:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 6px 12px rgba(243, 156, 18, 0.4);
+}
+
+.tile.selected {
+    background: linear-gradient(135deg, #007bff, #0056b3);
+    color: white;
+    border-color: #0056b3;
+    transform: translateY(-3px);
+}
+
+.tile.discarded {
+    background: linear-gradient(135deg, #6c757d, #495057);
+    color: white;
+    border-color: #495057;
+    cursor: default;
+    opacity: 0.7;
+}
+
+.tile.discarded:hover {
+    transform: none;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* Rotate discarded tiles for players */
+.top-discards .tile {
+    transform: rotate(180deg);
+}
+
+.left-discards .tile {
+    transform: rotate(90deg);
+    margin-top: -30px; /* Vertical overlap for rotated discards */
+}
+
+.left-discards .tile:first-child {
+    margin-top: 0; /* No overlap for first tile */
+}
+
+.right-discards .tile {
+    transform: rotate(-90deg);
+    margin-top: -30px; /* Vertical overlap for rotated discards */
+}
+
+.right-discards .tile:first-child {
+    margin-top: 0; /* No overlap for first tile */
+}
+
+/* Ensure hover effects respect the rotation */
+.top-discards .tile:hover {
+    transform: rotate(180deg) translateY(-3px);
+}
+
+.left-discards .tile:hover {
+    transform: rotate(90deg) translateY(-3px);
+}
+
+.right-discards .tile:hover {
+    transform: rotate(-90deg) translateY(-3px);
+}
+
+.top-discards .tile.discarded:hover {
+    transform: rotate(180deg);
+}
+
+.left-discards .tile.discarded:hover {
+    transform: rotate(90deg);
+}
+
+.right-discards .tile.discarded:hover {
+    transform: rotate(-90deg);
+}
+
+.game-status {
+    text-align: center;
+    margin-top: 20px;
+}
+
+.status-message {
+    padding: 15px;
+    border-radius: 10px;
+    font-weight: bold;
+    font-size: 1.1em;
+}
+
+.status-message.success {
+    background: rgba(76, 175, 80, 0.2);
+    color: #2e7d32;
+    border: 2px solid #4caf50;
+}
+
+.status-message.error {
+    background: rgba(244, 67, 54, 0.2);
+    color: #c62828;
+    border: 2px solid #f44336;
+}
+
+.status-message.info {
+    background: rgba(33, 150, 243, 0.2);
+    color: #1565c0;
+    border: 2px solid #2196f3;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    .container {
+        padding: 10px;
+    }
+    
+    header h1 {
+        font-size: 2em;
+    }
+    
+    .game-info {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .ai-player {
+        min-width: 120px;
+        padding: 10px;
+    }
+    
+    .tile {
+        width: 40px;
+        height: 56px;
+        font-size: 1em;
+    }
+} 

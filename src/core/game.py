@@ -1,5 +1,5 @@
 import random
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from dataclasses import dataclass
 from enum import Enum
 
@@ -35,6 +35,30 @@ class Tile:
 
 
 @dataclass
+class Action:
+    """Represents a player action"""
+    pass
+
+
+@dataclass
+class Tsumo(Action):
+    """Action to declare a win (tsumo)"""
+    pass
+
+
+@dataclass
+class Ron(Action):
+    """Action to declare a win on another player's discard (ron)"""
+    pass
+
+
+@dataclass
+class Discard(Action):
+    """Action to discard a tile"""
+    tile: Tile
+
+
+@dataclass
 class GameState:
     """Container for game state information available to a player"""
     player_hand: List[Tile]
@@ -51,14 +75,27 @@ class Player:
         self.player_id = player_id
         self.hand: List[Tile] = []
     
-    def play(self, game_state: GameState) -> Optional[Tile]:
+    def play(self, game_state: GameState) -> Action:
         """
-        Player's turn - returns a tile to discard from hand
-        For now, just returns a random tile from hand
+        Player's turn - returns an Action (Tsumo, Ron, or Discard)
+        First checks if the player can win with the current hand
         """
         if not self.hand:
-            return None
-        return random.choice(self.hand)
+            return Tsumo()  # If no tiles, can't do anything but declare win
+        
+        # Check if we can win with current hand (Tsumo)
+        if self.can_win():
+            return Tsumo()
+        
+        # Check if we can win with any of the recently discarded tiles (Ron)
+        # Look at the most recently discarded tile (last tile in visible_tiles)
+        if game_state.visible_tiles:
+            last_discarded = game_state.visible_tiles[-1]
+            if self.can_ron(last_discarded):
+                return Ron()
+        
+        # If we can't win, discard a random tile
+        return Discard(random.choice(self.hand))
     
     def add_tile(self, tile: Tile):
         """Add a tile to player's hand"""
@@ -72,9 +109,9 @@ class Player:
     def can_win(self) -> bool:
         """
         Check if the player can win with current hand
-        Need 3 sets of 3 tiles (triplets like 333, or runs like 234)
+        Need 4 sets of 3 tiles (triplets like 333, or runs like 234)
         """
-        if len(self.hand) != 9:  # Need exactly 9 tiles to win
+        if len(self.hand) != 12:  # Need exactly 12 tiles to win
             return False
         
         # Convert hand to a count dictionary for easier manipulation
@@ -82,8 +119,19 @@ class Player:
         for tile in self.hand:
             tile_counts[tile.tile_type.value] = tile_counts.get(tile.tile_type.value, 0) + 1
         
-        # Try all possible ways to form 3 sets
-        return self._can_form_sets(tile_counts, 3)
+        # Try all possible ways to form 4 sets
+        return self._can_form_sets(tile_counts, 4)
+
+    def can_ron(self, discarded_tile: Tile) -> bool:
+        """
+        Check if the player can declare Ron with the given discarded tile
+        This is similar to can_win() but includes the discarded tile in the hand
+        """
+        # Temporarily add the discarded tile to check if we can win
+        self.add_tile(discarded_tile)
+        can_win_with_tile = self.can_win()
+        self.remove_tile(discarded_tile)  # Remove it back
+        return can_win_with_tile
 
     def _can_form_sets(self, tile_counts: Dict[int, int], sets_needed: int) -> bool:
         """
@@ -150,17 +198,17 @@ class SimpleJong:
         self.game_over = False
         self.winner = None
         
-        # Initialize tiles: 6 copies of each tile type (1-9)
+        # Initialize tiles: 8 copies of each tile type (1-9)
         for tile_type in TileType:
-            for _ in range(6):
+            for _ in range(8):
                 self.tiles.append(Tile(tile_type))
         
         # Shuffle tiles
         random.shuffle(self.tiles)
         
-        # Deal 8 tiles to each player
+        # Deal 11 tiles to each player
         for player in self.players:
-            for _ in range(8):
+            for _ in range(11):
                 if self.tiles:
                     tile = self.tiles.pop()
                     player.add_tile(tile)
@@ -195,31 +243,35 @@ class SimpleJong:
             new_tile = self.tiles.pop()
             current_player.add_tile(new_tile)
             
-            # 2. Check for win
-            if current_player.can_win():
+            # 2. Get game state and let player decide what to do
+            game_state = self.get_game_state(self.current_player_idx)
+            action = current_player.play(game_state)
+            
+            # 3. Handle player's decision
+            if isinstance(action, Tsumo):
+                # Player declared a win
                 self.winner = self.current_player_idx
                 self.game_over = True
                 return self.winner
-            
-            # 3. Discard a tile
-            game_state = self.get_game_state(self.current_player_idx)
-            discarded_tile = current_player.play(game_state)
-            
-            if discarded_tile:
-                current_player.remove_tile(discarded_tile)
-                self.discarded_tiles.append(discarded_tile)
+            elif isinstance(action, Ron):
+                # Player declared a Ron
+                self.winner = self.current_player_idx
+                self.game_over = True
+                return self.winner
+            elif isinstance(action, Discard):
+                # Player discarded a tile
+                current_player.remove_tile(action.tile)
+                self.discarded_tiles.append(action.tile)
                 
-                # Check if another player can win with the discarded tile
+                # Check if another player can win with the discarded tile (Ron)
                 for i, player in enumerate(self.players):
                     if i != self.current_player_idx:
-                        player.add_tile(discarded_tile)
-                        if player.can_win():
+                        if player.can_ron(action.tile):
                             self.winner = i
                             self.game_over = True
-                            # The tile is "claimed" so it's not on the table
-                            # but in the winner's hand.
-                            return self.winner 
-                        player.remove_tile(discarded_tile) # backtrack
+                            # The tile is "claimed" by the Ron winner, so add it to their hand
+                            player.add_tile(action.tile)
+                            return self.winner
             
             # Move to next player
             self.current_player_idx = (self.current_player_idx + 1) % 4
@@ -237,4 +289,4 @@ class SimpleJong:
     
     def get_remaining_tiles(self) -> int:
         """Get number of remaining tiles"""
-        return len(self.tiles)
+        return len(self.tiles) 

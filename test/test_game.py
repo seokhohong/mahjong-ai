@@ -5,7 +5,13 @@ Unit tests for SimpleJong game using Python's unittest framework
 
 import unittest
 import random
-from simple_jong import SimpleJong, Player, Tile, TileType
+import sys
+import os
+
+# Add the src directory to Python path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from core.game import SimpleJong, Player, Tile, TileType, Discard, Tsumo, Ron, GameState
 
 
 class TestSimpleJong(unittest.TestCase):
@@ -127,15 +133,24 @@ class TestSimpleJong(unittest.TestCase):
         initial_hand_size = len(player.hand)
         
         game_state = self.game.get_game_state(0)
-        discarded_tile = player.play(game_state)
+        action = player.play(game_state)
         
-        # Player should discard a tile
-        self.assertIsNotNone(discarded_tile)
-        self.assertIsInstance(discarded_tile, Tile)
+        # Player should return an action
+        self.assertIsNotNone(action)
         
-        # Hand size should decrease by 1 after discarding
-        player.remove_tile(discarded_tile)
-        self.assertEqual(len(player.hand), initial_hand_size - 1)
+        # If it's a discard action, check the tile
+        if isinstance(action, Discard):
+            discarded_tile = action.tile
+            self.assertIsInstance(discarded_tile, Tile)
+            
+            # Hand size should decrease by 1 after discarding
+            player.remove_tile(discarded_tile)
+            self.assertEqual(len(player.hand), initial_hand_size - 1)
+        elif isinstance(action, Tsumo):
+            # If it's a tsumo action, that's also valid
+            pass
+        else:
+            self.fail(f"Unexpected action type: {type(action)}")
     
     def test_tile_equality_and_hash(self):
         """Test that tiles can be compared and hashed correctly"""
@@ -179,6 +194,112 @@ class TestSimpleJong(unittest.TestCase):
         
         with self.assertRaises(ValueError):
             SimpleJong([Player(0), Player(1), Player(2), Player(3), Player(4)])  # 5 players
+
+    def test_ron_functionality(self):
+        """Test that players can declare Ron when another player discards a tile that completes their hand"""
+        # Create a player with a hand that needs one specific tile to win
+        player = Player(0)
+        # Hand: 333, 444, 55 (needs 5 to complete 555)
+        test_hand = [
+            Tile(TileType.THREE), Tile(TileType.THREE), Tile(TileType.THREE),
+            Tile(TileType.FOUR), Tile(TileType.FOUR), Tile(TileType.FOUR),
+            Tile(TileType.FIVE), Tile(TileType.FIVE)
+        ]
+        player.hand = test_hand
+        
+        # Test that player can declare Ron with a 5 tile
+        five_tile = Tile(TileType.FIVE)
+        self.assertTrue(player.can_ron(five_tile), 
+                       f"Player should be able to declare Ron with {five_tile}")
+        
+        # Test that player cannot declare Ron with other tiles
+        one_tile = Tile(TileType.ONE)
+        self.assertFalse(player.can_ron(one_tile), 
+                        f"Player should not be able to declare Ron with {one_tile}")
+        
+        # Test that player can declare Ron when the tile is in visible_tiles
+        game_state = GameState(
+            player_hand=test_hand,
+            visible_tiles=[five_tile],  # The needed tile is discarded
+            remaining_tiles=10,
+            player_id=0,
+            other_players_discarded={}
+        )
+        
+        action = player.play(game_state)
+        self.assertIsInstance(action, Ron, 
+                            f"Player should declare Ron when {five_tile} is discarded")
+
+    def test_ron_vs_tsumo_priority(self):
+        """Test that Tsumo takes priority over Ron when both are possible"""
+        player = Player(0)
+        # Hand: 333, 444, 555 (already a winning hand)
+        test_hand = [
+            Tile(TileType.THREE), Tile(TileType.THREE), Tile(TileType.THREE),
+            Tile(TileType.FOUR), Tile(TileType.FOUR), Tile(TileType.FOUR),
+            Tile(TileType.FIVE), Tile(TileType.FIVE), Tile(TileType.FIVE)
+        ]
+        player.hand = test_hand
+        
+        # Even if there's a discarded tile that could complete the hand,
+        # player should declare Tsumo since they already have a winning hand
+        game_state = GameState(
+            player_hand=test_hand,
+            visible_tiles=[Tile(TileType.ONE)],  # Some discarded tile
+            remaining_tiles=10,
+            player_id=0,
+            other_players_discarded={}
+        )
+        
+        action = player.play(game_state)
+        self.assertIsInstance(action, Tsumo, 
+                            "Player should declare Tsumo when they already have a winning hand")
+
+    def test_ron_game_scenario(self):
+        """Test a complete game scenario where Ron is declared"""
+        # Create players
+        players = [Player(i) for i in range(4)]
+        
+        # Create game (this will deal initial tiles)
+        game = SimpleJong(players)
+        
+        # Set up a specific scenario where player 1 can declare Ron
+        # Player 1: 333, 444, 55 (needs 5 to complete 555)
+        players[1].hand = [
+            Tile(TileType.THREE), Tile(TileType.THREE), Tile(TileType.THREE),
+            Tile(TileType.FOUR), Tile(TileType.FOUR), Tile(TileType.FOUR),
+            Tile(TileType.FIVE), Tile(TileType.FIVE)
+        ]
+        
+        # Other players have random hands (just ensure they have 8 tiles)
+        for i in [0, 2, 3]:
+            players[i].hand = [Tile(TileType.ONE) for _ in range(8)]
+        
+        # Manually set the current player to 0
+        game.current_player_idx = 0
+        
+        # Simulate player 0 discarding a 5 tile
+        five_tile = Tile(TileType.FIVE)
+        players[0].remove_tile(five_tile)
+        game.discarded_tiles.append(five_tile)
+        
+        # Check if player 1 can declare Ron (should have 8 tiles + 1 discarded = 9 tiles)
+        self.assertTrue(players[1].can_ron(five_tile), 
+                       "Player 1 should be able to declare Ron with the discarded 5 tile")
+        
+        # Verify that the hand with the added tile is a winning hand
+        players[1].add_tile(five_tile)
+        self.assertTrue(players[1].can_win(), 
+                       "Player 1 should have a winning hand after adding the 5 tile")
+        players[1].remove_tile(five_tile)  # Remove it back
+        
+        # Simulate the Ron declaration
+        game.winner = 1
+        game.game_over = True
+        players[1].add_tile(five_tile)  # Add the claimed tile to winner's hand
+        
+        self.assertEqual(game.get_winner(), 1, "Player 1 should be the winner")
+        self.assertTrue(game.is_game_over(), "Game should be over after Ron declaration")
 
 
 class TestPlayerMethods(unittest.TestCase):

@@ -1,113 +1,147 @@
-# SimpleJong - Simplified Mahjong AI Project
+# Mahjong AI - Simple Jong
 
-A simplified mahjong game implementation designed for AI/RL research. This version focuses on Pinzu tiles only with simplified rules to make it easier to implement and test AI strategies.
+A visual web-based implementation of a simplified Mahjong game using only Pinzu tiles (1-9). Play against 3 AI players in a beautiful, modern interface.
 
-## Game Rules
+## Features
 
-- **Tiles**: Only Pinzu tiles (1-9), 6 copies of each type
-- **Players**: 4 players
-- **Starting hand**: 8 tiles per player
-- **Objective**: Complete 3 sets of 3 tiles to win
-- **Valid sets**:
-  - Sets of 3 identical tiles (e.g., 333, 444, 555)
-  - Sequences of 3 consecutive tiles (e.g., 123, 234, 345, 456, 567, 678, 789)
-- **Gameplay**: Players take turns discarding one tile and drawing one tile
-- **Winning**: First player to complete 3 sets wins
-- **Draw**: If no tiles remain, the game ends in a draw
+- **Visual Game Interface**: Modern, responsive web interface with beautiful tile graphics
+- **1 Human vs 3 AI Players**: Play against AI opponents using random strategy
+- **Real-time Game State**: See your hand, discarded tiles, and other players' hand sizes
+- **Interactive Gameplay**: Click tiles to discard them, or declare Tsumo when you can win
+- **Extensible Architecture**: Easy to extend with new AI strategies and full Mahjong rules
 
 ## Project Structure
 
 ```
 mahjong-ai/
-├── simple_jong.py      # Main game implementation
-├── test_simple_jong.py # Test and demonstration script
-└── README.md          # This file
+├── src/                    # Source code
+│   ├── core/              # Core game logic
+│   │   ├── __init__.py
+│   │   └── game.py        # Main game engine and classes
+│   ├── web/               # Web interface
+│   │   ├── __init__.py
+│   │   ├── app.py         # Flask application
+│   │   ├── templates/     # HTML templates
+│   │   └── static/        # CSS, JS, and static assets
+│   ├── __init__.py
+│   └── demo_ron.py        # Demo script for Ron functionality
+├── test/                  # Test files
+│   ├── __init__.py
+│   └── test_game.py       # Unit tests for game logic
+├── run.py                 # Main entry point
+├── run_tests.py           # Test runner script
+├── requirements.txt       # Python dependencies
+└── README.md             # This file
 ```
 
-## Classes
+## Quick Start
 
-### `SimpleJong`
-The main game class that manages the game state and flow.
+### Prerequisites
 
-**Constructor:**
-```python
-SimpleJong(players: List[Player])
-```
+- Python 3.7 or higher
+- pip (Python package installer)
 
-**Key methods:**
-- `play_round()`: Play one complete round, returns winner's player_id or None
-- `get_game_state(player_id)`: Get game state for a specific player
-- `get_winner()`: Get the winner's player_id
-- `is_game_over()`: Check if the game is over
-- `get_remaining_tiles()`: Get number of remaining tiles
+### Installation
 
-### `Player`
-Base player class that can be extended for AI implementations.
+1. Clone or download this repository
+2. Install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-**Key methods:**
-- `play(game_state)`: Player's turn - returns a tile to discard
-- `can_win()`: Check if the player can win with current hand
-- `add_tile(tile)`: Add a tile to player's hand
-- `remove_tile(tile)`: Remove a tile from player's hand
+### Running the App
 
-### `GameState`
-Data container for game state information available to a player.
+1. Start the Flask application:
+   ```bash
+   python run.py
+   ```
 
-**Fields:**
-- `player_hand`: List of tiles in player's hand
-- `visible_tiles`: List of tiles on the table
-- `remaining_tiles`: Number of remaining tiles in deck
-- `player_id`: Player's ID
-- `other_players_discarded`: Dictionary of other players' discarded tiles
+2. Open your web browser and navigate to:
+   ```
+   http://localhost:5000
+   ```
 
-### `Tile`
-Represents a single tile.
+3. Click "New Game" to start playing!
 
-**Fields:**
-- `tile_type`: TileType enum value (1-9)
+### Running Tests
 
-## Usage Example
-
-```python
-from simple_jong import SimpleJong, Player
-
-# Create 4 players
-players = [Player(i) for i in range(4)]
-
-# Create and play a game
-game = SimpleJong(players)
-winner = game.play_round()
-
-if winner is not None:
-    print(f"Player {winner} wins!")
-else:
-    print("Game ended in a draw")
-```
-
-## Running Tests
-
-To run the test script:
-
+Run the test suite:
 ```bash
-python test_simple_jong.py
+python run_tests.py
 ```
 
-This will:
-1. Test the winning hand detection logic with various scenarios
-2. Play a complete game with 4 random players
-3. Display the results and verify the winning hand
+Or run tests directly:
+```bash
+python -m unittest test.test_game -v
+```
 
-## Future Enhancements
+### Running Demo
 
-This simplified version is designed as a foundation for:
-- Reinforcement learning experiments
-- AI strategy development
-- Game theory research
-- Multi-agent systems
+Run the Ron demonstration:
+```bash
+python src/demo_ron.py
+```
 
-Potential extensions:
-- Chi and Pon mechanics
-- More complex scoring systems
-- Different tile types (Manzu, Souzu)
-- Wind and dragon tiles
-- More sophisticated AI players 
+## How to Play
+
+### Game Rules (Simplified Mahjong)
+
+- **Objective**: Be the first to form a winning hand with exactly 9 tiles
+- **Winning Hand**: Must consist of 3 sets of 3 tiles each:
+  - **Triplets**: Three identical tiles (e.g., 3-3-3)
+  - **Runs**: Three consecutive tiles (e.g., 1-2-3, 4-5-6)
+- **Gameplay**: 
+  - Each player starts with 8 tiles
+  - On your turn, draw 1 tile and discard 1 tile
+  - Declare "Tsumo" when you have a winning hand
+
+### Interface
+
+- **Your Hand**: Displayed at the bottom of the screen
+- **AI Players**: Shown at the top, left, and right with hand sizes
+- **Discarded Tiles**: Visible in the center area
+- **Game Info**: Shows current player, remaining tiles, and game status
+
+### Controls
+
+- **Click a tile**: Select and automatically discard it
+- **Declare Tsumo**: Click the "Declare Tsumo" button when you can win
+- **New Game**: Start a new game (available when current game ends)
+
+## Architecture
+
+### Backend (Python/Flask)
+
+- `src/core/game.py`: Core game engine and rules
+- `src/web/app.py`: Main Flask application with web interface
+- `test/test_game.py`: Unit tests for game logic
+
+### Frontend (HTML/CSS/JavaScript)
+
+- `src/web/templates/index.html`: Main game interface
+- `src/web/static/css/style.css`: Modern, responsive styling
+- `src/web/static/js/game.js`: Interactive game logic
+
+### Key Classes
+
+- `SimpleJong`: Core game engine
+- `Player`: Base player class
+- `HumanPlayer`: Human player with web interface
+- `AIPlayer`: AI player with random strategy
+- `GameManager`: Manages game state and web interactions
+
+## Extending the App
+
+### Adding New AI Strategies
+
+1. Create a new AI player class inheriting from `Player`:
+   ```python
+   class SmartAIPlayer(Player):
+       def play(self, game_state):
+           # Implement your AI strategy here
+           pass
+   ``` 
+- Improving the user interface
+- Adding new game features
+- Fixing bugs or improving performance
+- Writing additional tests 
