@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mahjong Debug Viewer</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  <style>
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .panel { margin-top: 12px; }
+    .policy-bar { height: 6px; background: #4caf50; display: inline-block; margin-right: 1px; }
+    .policy-container { max-width: 600px; white-space: nowrap; overflow-x: auto; border: 1px solid #ddd; padding: 4px; }
+  </style>
+  <script>
+    async function listFiles() {
+      const res = await fetch('/api/debug/list_files');
+      const data = await res.json();
+      const sel = document.getElementById('file-select');
+      sel.innerHTML = '';
+      data.files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f; opt.textContent = f; sel.appendChild(opt);
+      });
+    }
+
+    async function loadSelected() {
+      const sel = document.getElementById('file-select');
+      const path = sel.value;
+      if (!path) return;
+      const res = await fetch('/api/debug/load_file', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})
+      });
+      const data = await res.json();
+      if (!data.ok) { alert(data.error || 'Failed to load'); return; }
+      document.getElementById('game-idx').value = 0;
+      document.getElementById('step-idx').value = 0;
+      await refreshState();
+    }
+
+    async function refreshState() {
+      const g = parseInt(document.getElementById('game-idx').value || '0');
+      const s = parseInt(document.getElementById('step-idx').value || '0');
+      const res = await fetch(`/api/debug/get_state?game=${g}&step=${s}`);
+      const data = await res.json();
+      if (!data.ok) { alert(data.error || 'No state'); return; }
+      // Render board using existing watch-mode layout from index page
+      renderBoard(data.state);
+      renderPolicyValue(data.policy, data.value, data.step_index, data.total_steps, data.game_index, data.total_games);
+      document.getElementById('game-idx').value = data.game_index;
+      document.getElementById('step-idx').value = data.step_index;
+      document.getElementById('total-steps').textContent = data.total_steps;
+      document.getElementById('total-games').textContent = data.total_games;
+    }
+
+    function nav(deltaStep, deltaGame) {
+      let g = parseInt(document.getElementById('game-idx').value || '0');
+      let s = parseInt(document.getElementById('step-idx').value || '0');
+      if (deltaGame) { g = Math.max(0, g + deltaGame); s = 0; }
+      if (deltaStep) { s = Math.max(0, s + deltaStep); }
+      document.getElementById('game-idx').value = g;
+      document.getElementById('step-idx').value = s;
+      refreshState();
+    }
+
+    function getTileImage(tileStr) {
+      const suit = tileStr.slice(-1);
+      const number = tileStr.slice(0, -1);
+      let suitName = suit === 'p' ? 'Pin' : 'Sou';
+      return `/static/images/tiles/${suitName}${number}.svg`;
+    }
+
+    function renderBoard(state) {
+      // Minimal watch-mode render: show discards and a single hand as "current player hand"
+      const hand = document.getElementById('debug-hand');
+      const discards = [document.getElementById('d0'), document.getElementById('d1'), document.getElementById('d2'), document.getElementById('d3')];
+      hand.innerHTML = '';
+      discards.forEach(d => d.innerHTML = '');
+      (state.human_hand || []).forEach(t => {
+        const el = document.createElement('div'); el.className = 'tile';
+        const img = document.createElement('img'); img.src = getTileImage(t); img.alt = t; el.appendChild(img);
+        hand.appendChild(el);
+      });
+      (state.player_discards || []).forEach((arr, idx) => {
+        arr.forEach(t => {
+          const el = document.createElement('div'); el.className = 'tile';
+          const img = document.createElement('img'); img.src = getTileImage(t); img.alt = t; el.appendChild(img);
+          discards[idx].appendChild(el);
+        });
+      });
+      document.getElementById('remaining').textContent = state.remaining_tiles;
+      document.getElementById('last-discard').textContent = state.last_discarded_tile || '-';
+      document.getElementById('current-player').textContent = state.current_player;
+    }
+
+    function renderPolicyValue(policy, value, stepIdx, totalSteps, gameIdx, totalGames) {
+      document.getElementById('value-display').textContent = value.toFixed(4);
+      // Render top-N policy bars
+      const top = [...policy].map((p, i) => ({p, i})).sort((a,b)=>b.p-a.p).slice(0, 20);
+      const cont = document.getElementById('policy-container');
+      cont.innerHTML = '';
+      top.forEach(({p, i}) => {
+        const div = document.createElement('div');
+        div.className = 'policy-bar';
+        div.style.width = `${Math.max(1, p*200)}px`;
+        div.title = `a${i}: ${p.toFixed(4)}`;
+        cont.appendChild(div);
+      });
+      document.getElementById('pos-display').textContent = `Game ${gameIdx+1}/${totalGames}, Step ${stepIdx+1}/${totalSteps}`;
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      await listFiles();
+      document.getElementById('load-btn').addEventListener('click', loadSelected);
+      document.getElementById('prev-game').addEventListener('click', () => nav(0, -1));
+      document.getElementById('next-game').addEventListener('click', () => nav(0, 1));
+      document.getElementById('prev-step').addEventListener('click', () => nav(-1, 0));
+      document.getElementById('next-step').addEventListener('click', () => nav(1, 0));
+    });
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Training Data Debug Viewer</h1>
+      <div class="toolbar">
+        <select id="file-select" style="min-width: 420px;"></select>
+        <button id="load-btn" class="btn btn-primary">Load</button>
+        <span id="pos-display"></span>
+      </div>
+      <div class="toolbar">
+        <button id="prev-game" class="btn btn-secondary">Prev Game</button>
+        <button id="next-game" class="btn btn-secondary">Next Game</button>
+        <span>Game:</span>
+        <input id="game-idx" type="number" value="0" min="0" style="width: 64px;" />
+        <span>Step:</span>
+        <input id="step-idx" type="number" value="0" min="0" style="width: 64px;" />
+        <button id="prev-step" class="btn">Prev Step</button>
+        <button id="next-step" class="btn">Next Step</button>
+        <span>Total Steps: <span id="total-steps">-</span>, Total Games: <span id="total-games">-</span></span>
+      </div>
+    </header>
+
+    <div class="mahjong-table">
+      <div class="player-area top-player">
+        <div class="player-discards top-discards"><div id="d2" class="discard-area"></div></div>
+      </div>
+      <div class="player-area left-player">
+        <div class="player-discards left-discards"><div id="d1" class="discard-area"></div></div>
+      </div>
+      <div class="player-area right-player">
+        <div class="player-discards right-discards"><div id="d3" class="discard-area"></div></div>
+      </div>
+      <div class="player-area bottom-player">
+        <div class="player-hand horizontal-hand"><div id="debug-hand" class="tiles-container horizontal"></div></div>
+        <div class="player-discards bottom-discards"><div id="d0" class="discard-area"></div></div>
+      </div>
+      <div class="center-area">
+        <div class="table-center">
+          <div class="remaining-tiles-info">
+            <span>Remaining: <span id="remaining">-</span></span>
+            <span style="margin-left: 16px;">Last discard: <span id="last-discard">-</span></span>
+            <span style="margin-left: 16px;">Current Player: <span id="current-player">-</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Policy and Value</h3>
+      <div>Value: <span id="value-display">-</span></div>
+      <div id="policy-container" class="policy-container"></div>
+    </div>
+  </div>
+</body>
+</html>
+

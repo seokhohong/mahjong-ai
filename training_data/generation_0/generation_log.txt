@@ -1,0 +1,64 @@
+[2025-08-07 23:34:03] Starting training data generation for generation 0
+[2025-08-07 23:34:03] Max games: 1000
+[2025-08-07 23:34:03] Simulations per move: 100
+[2025-08-07 23:34:03] Using random policies
+[2025-08-07 23:34:06] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_100.npz
+[2025-08-07 23:34:09] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_200.npz
+[2025-08-07 23:34:13] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_300.npz
+[2025-08-07 23:34:16] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_400.npz
+[2025-08-07 23:34:20] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_500.npz
+[2025-08-07 23:34:24] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_600.npz
+[2025-08-07 23:34:28] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_700.npz
+[2025-08-07 23:34:33] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_800.npz
+[2025-08-07 23:34:38] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_900.npz
+[2025-08-07 23:34:43] Saved intermediate data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_intermediate_1000.npz
+[2025-08-07 23:34:43] Training data generation completed!
+[2025-08-07 23:34:43] Total games played: 1000
+[2025-08-07 23:34:43] Total moves recorded: 27823
+[2025-08-07 23:34:43] Feature matrix shape: (27823, 102)
+[2025-08-07 23:34:43] Policy labels shape: (27823, 200)
+[2025-08-07 23:34:43] Value labels shape: (27823,)
+[2025-08-07 23:34:44] Saved training data to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data.npz
+[2025-08-07 23:34:44] Saved metadata to /Users/seokhohong/Documents/mahjong-ai/training_data/generation_0/data/test_training_data_metadata.pkl
+[2025-08-07 23:50:45] Starting training data generation for generation 0
+[2025-08-07 23:50:45] Max games: 1
+[2025-08-07 23:50:45] Simulations per move: 1
+[2025-08-07 23:50:45] Using random policies
+[2025-08-07 23:50:45] Saved intermediate data slice [0:28] to training_data/generation_0/data/test_training_data_intermediate_0_28.npz
+[2025-08-07 23:50:45] Training data generation completed!
+[2025-08-07 23:50:45] Total games played: 1
+[2025-08-07 23:50:45] Total moves recorded: 28
+[2025-08-07 23:50:45] Feature matrix shape: (28, 102)
+[2025-08-07 23:50:45] Policy labels shape: (28, 41)
+[2025-08-07 23:50:45] Value labels shape: (28,)
+[2025-08-07 23:50:45] Saved training data to training_data/generation_0/data/test_training_data.npz
+[2025-08-07 23:50:45] Saved metadata to training_data/generation_0/data/test_training_data_metadata.pkl
+[2025-08-07 23:50:45] Cleaned up 1 intermediate file(s)
+[2025-08-07 23:53:23] Starting training data generation for generation 0
+[2025-08-07 23:53:23] Max games: 1
+[2025-08-07 23:53:23] Simulations per move: 1
+[2025-08-07 23:53:23] Using random policies
+[2025-08-07 23:53:23] Saved intermediate data slice [0:28] to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_0/data/test_training_data_intermediate_0_28.npz
+[2025-08-07 23:53:23] Training data generation completed!
+[2025-08-07 23:53:23] Total games played: 1
+[2025-08-07 23:53:23] Total moves recorded: 28
+[2025-08-07 23:53:23] Feature matrix shape: (28, 102)
+[2025-08-07 23:53:23] Policy labels shape: (28, 41)
+[2025-08-07 23:53:23] Value labels shape: (28,)
+[2025-08-07 23:53:23] Saved training data to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_0/data/test_training_data.npz
+[2025-08-07 23:53:23] Saved metadata to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_0/data/test_training_data_metadata.pkl
+[2025-08-07 23:53:23] Cleaned up 1 intermediate file(s)
+[2025-08-07 23:54:10] Starting training data generation for generation 0
+[2025-08-07 23:54:10] Max games: 1
+[2025-08-07 23:54:10] Simulations per move: 1
+[2025-08-07 23:54:10] Using random policies
+[2025-08-07 23:54:10] Saved intermediate data slice [0:28] to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_0/data/test_training_data_intermediate_0_28.npz
+[2025-08-07 23:54:10] Training data generation completed!
+[2025-08-07 23:54:10] Total games played: 1
+[2025-08-07 23:54:10] Total moves recorded: 28
+[2025-08-07 23:54:10] Feature matrix shape: (28, 102)
+[2025-08-07 23:54:10] Policy labels shape: (28, 41)
+[2025-08-07 23:54:10] Value labels shape: (28,)
+[2025-08-07 23:54:10] Saved training data to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_0/data/test_training_data.npz
+[2025-08-07 23:54:10] Saved metadata to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_0/data/test_training_data_metadata.pkl
+[2025-08-07 23:54:10] Cleaned up 1 intermediate file(s)

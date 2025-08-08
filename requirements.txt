@@ -1,2 +1,13 @@
 Flask==2.3.3
-Werkzeug==2.3.7 
+Werkzeug==2.3.7
+
+# NumPy compatible with Python 3.11 and TensorFlow 2.15
+# (TF 2.15 constraints typically require numpy < 1.26)
+numpy>=1.24.3,<1.26
+
+# TensorFlow: use Apple package on macOS arm64, otherwise standard tensorflow
+tensorflow-macos==2.15.0; platform_system == "Darwin" and platform_machine == "arm64"
+tensorflow-metal==1.1.0; platform_system == "Darwin" and platform_machine == "arm64"
+tensorflow==2.15.0; platform_system != "Darwin" or platform_machine != "arm64"
+
+tqdm==4.66.1

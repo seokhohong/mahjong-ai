@@ -1,0 +1,99 @@
+[2025-08-07 21:54:44] Starting training data generation for generation 1
+[2025-08-07 21:54:44] Max games: 3
+[2025-08-07 21:54:44] Simulations per move: 50
+[2025-08-07 21:54:44] Using PQNetwork policies
+[2025-08-07 23:07:22] Saved intermediate data to training_data/generation_1/data/test_training_data_pq_intermediate_2.npz
+[2025-08-07 23:12:30] Starting training data generation for generation 1
+[2025-08-07 23:12:30] Max games: 1
+[2025-08-07 23:12:30] Simulations per move: 1
+[2025-08-07 23:12:30] Using PQNetwork policies
+[2025-08-07 23:12:52] Saved intermediate data to training_data/generation_1/data/test_training_data_pq_intermediate_1.npz
+[2025-08-07 23:12:52] Training data generation completed!
+[2025-08-07 23:12:52] Total games played: 1
+[2025-08-07 23:12:52] Total moves recorded: 28
+[2025-08-07 23:12:52] Feature matrix shape: (28, 118)
+[2025-08-07 23:12:52] Policy labels shape: (28, 200)
+[2025-08-07 23:12:52] Value labels shape: (28,)
+[2025-08-07 23:12:52] Saved training data to training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:12:52] Saved metadata to training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:13:31] Starting training data generation for generation 1
+[2025-08-07 23:13:31] Max games: 1
+[2025-08-07 23:13:31] Simulations per move: 1
+[2025-08-07 23:13:31] Using PQNetwork policies
+[2025-08-07 23:13:35] Saved intermediate data to training_data/generation_1/data/test_training_data_pq_intermediate_1.npz
+[2025-08-07 23:13:35] Training data generation completed!
+[2025-08-07 23:13:35] Total games played: 1
+[2025-08-07 23:13:35] Total moves recorded: 5
+[2025-08-07 23:13:35] Feature matrix shape: (5, 118)
+[2025-08-07 23:13:35] Policy labels shape: (5, 200)
+[2025-08-07 23:13:35] Value labels shape: (5,)
+[2025-08-07 23:13:35] Saved training data to training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:13:35] Saved metadata to training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:15:20] Starting training data generation for generation 1
+[2025-08-07 23:15:20] Max games: 1
+[2025-08-07 23:15:20] Simulations per move: 1
+[2025-08-07 23:15:20] Using PQNetwork policies
+[2025-08-07 23:15:23] Saved intermediate data to training_data/generation_1/data/test_training_data_pq_intermediate_1.npz
+[2025-08-07 23:15:23] Training data generation completed!
+[2025-08-07 23:15:23] Total games played: 1
+[2025-08-07 23:15:23] Total moves recorded: 5
+[2025-08-07 23:15:23] Feature matrix shape: (5, 118)
+[2025-08-07 23:15:23] Policy labels shape: (5, 200)
+[2025-08-07 23:15:23] Value labels shape: (5,)
+[2025-08-07 23:15:23] Saved training data to training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:15:23] Saved metadata to training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:20:54] Starting training data generation for generation 1
+[2025-08-07 23:20:54] Max games: 1
+[2025-08-07 23:20:54] Simulations per move: 1
+[2025-08-07 23:20:54] Using PQNetwork policies
+[2025-08-07 23:20:55] Saved intermediate data to training_data/generation_1/data/test_training_data_pq_intermediate_1.npz
+[2025-08-07 23:20:55] Training data generation completed!
+[2025-08-07 23:20:55] Total games played: 1
+[2025-08-07 23:20:55] Total moves recorded: 5
+[2025-08-07 23:20:55] Feature matrix shape: (5, 118)
+[2025-08-07 23:20:55] Policy labels shape: (5, 200)
+[2025-08-07 23:20:55] Value labels shape: (5,)
+[2025-08-07 23:20:55] Saved training data to training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:20:55] Saved metadata to training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:50:46] Starting training data generation for generation 1
+[2025-08-07 23:50:46] Max games: 1
+[2025-08-07 23:50:46] Simulations per move: 1
+[2025-08-07 23:50:46] Using PQNetwork policies
+[2025-08-07 23:50:47] Saved intermediate data slice [0:5] to training_data/generation_1/data/test_training_data_pq_intermediate_0_5.npz
+[2025-08-07 23:50:47] Training data generation completed!
+[2025-08-07 23:50:47] Total games played: 1
+[2025-08-07 23:50:47] Total moves recorded: 5
+[2025-08-07 23:50:47] Feature matrix shape: (5, 118)
+[2025-08-07 23:50:47] Policy labels shape: (5, 41)
+[2025-08-07 23:50:47] Value labels shape: (5,)
+[2025-08-07 23:50:47] Saved training data to training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:50:47] Saved metadata to training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:50:47] Cleaned up 1 intermediate file(s)
+[2025-08-07 23:53:23] Starting training data generation for generation 1
+[2025-08-07 23:53:23] Max games: 1
+[2025-08-07 23:53:23] Simulations per move: 1
+[2025-08-07 23:53:23] Using PQNetwork policies
+[2025-08-07 23:53:24] Saved intermediate data slice [0:5] to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_1/data/test_training_data_pq_intermediate_0_5.npz
+[2025-08-07 23:53:24] Training data generation completed!
+[2025-08-07 23:53:24] Total games played: 1
+[2025-08-07 23:53:24] Total moves recorded: 5
+[2025-08-07 23:53:24] Feature matrix shape: (5, 118)
+[2025-08-07 23:53:24] Policy labels shape: (5, 41)
+[2025-08-07 23:53:24] Value labels shape: (5,)
+[2025-08-07 23:53:24] Saved training data to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:53:24] Saved metadata to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:53:24] Cleaned up 1 intermediate file(s)
+[2025-08-07 23:54:10] Starting training data generation for generation 1
+[2025-08-07 23:54:10] Max games: 1
+[2025-08-07 23:54:10] Simulations per move: 1
+[2025-08-07 23:54:10] Using PQNetwork policies
+[2025-08-07 23:54:11] Saved intermediate data slice [0:5] to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_1/data/test_training_data_pq_intermediate_0_5.npz
+[2025-08-07 23:54:11] Training data generation completed!
+[2025-08-07 23:54:11] Total games played: 1
+[2025-08-07 23:54:11] Total moves recorded: 5
+[2025-08-07 23:54:11] Feature matrix shape: (5, 118)
+[2025-08-07 23:54:11] Policy labels shape: (5, 41)
+[2025-08-07 23:54:11] Value labels shape: (5,)
+[2025-08-07 23:54:11] Saved training data to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_1/data/test_training_data_pq.npz
+[2025-08-07 23:54:11] Saved metadata to /Users/seokhohong/Documents/mahjong-ai/test/../training_data/generation_1/data/test_training_data_pq_metadata.pkl
+[2025-08-07 23:54:11] Cleaned up 1 intermediate file(s)

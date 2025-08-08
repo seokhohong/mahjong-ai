@@ -18,16 +18,18 @@
         </header>
 
         <div class="game-controls">
-            <button id="new-game-btn" class="btn btn-primary">New Game</button>
-            <button id="tsumo-btn" class="btn btn-success" disabled>Declare Tsumo</button>
+            <button id="play-game-btn" class="btn btn-primary">Play Game</button>
+            <button id="watch-game-btn" class="btn btn-secondary">Watch Game</button>
+            <div id="action-buttons" style="display: inline-block;">
+                <!-- Action buttons will be dynamically added here -->
+            </div>
         </div>
 
         <div class="mahjong-table">
-            <!-- Top Player (Toimen - AI Player 2) -->
+            <!-- Top Player (Toimen - AI Player 2 in play mode, AI Player 2 in watch mode) -->
             <div class="player-area top-player">
                 <div class="player-info">
-                    <div class="player-label">AI Player 2 (Toimen)</div>
-                    <div class="hand-size">Hand: <span id="ai-hand-2">-</span></div>
+                    <div class="player-label" id="top-player-label">AI Player 2 (Toimen)</div>
                 </div>
                 <div class="player-hand horizontal-hand">
                     <div id="ai-hand-2-tiles" class="face-down-tiles horizontal"></div>
@@ -35,13 +37,15 @@
                 <div class="player-discards top-discards">
                     <div id="ai-discards-2" class="discard-area"></div>
                 </div>
+                <div class="called-sets">
+                    <div id="ai-called-sets-2"></div>
+                </div>
             </div>
 
-            <!-- Left Player (Kamicha - AI Player 1) -->
+            <!-- Left Player (Kamicha - AI Player 1 in play mode, AI Player 1 in watch mode) -->
             <div class="player-area left-player">
                 <div class="player-info">
-                    <div class="player-label">AI Player 1 (Kamicha)</div>
-                    <div class="hand-size">Hand: <span id="ai-hand-1">-</span></div>
+                    <div class="player-label" id="left-player-label">AI Player 1 (Kamicha)</div>
                 </div>
                 <div class="player-hand vertical-hand">
                     <div id="ai-hand-1-tiles" class="face-down-tiles vertical"></div>
@@ -49,13 +53,15 @@
                 <div class="player-discards left-discards">
                     <div id="ai-discards-1" class="discard-area"></div>
                 </div>
+                <div class="called-sets">
+                    <div id="ai-called-sets-1"></div>
+                </div>
             </div>
 
-            <!-- Right Player (Shimocha - AI Player 3) -->
+            <!-- Right Player (Shimocha - AI Player 3 in play mode, AI Player 3 in watch mode) -->
             <div class="player-area right-player">
                 <div class="player-info">
-                    <div class="player-label">AI Player 3 (Shimocha)</div>
-                    <div class="hand-size">Hand: <span id="ai-hand-3">-</span></div>
+                    <div class="player-label" id="right-player-label">AI Player 3 (Shimocha)</div>
                 </div>
                 <div class="player-hand vertical-hand">
                     <div id="ai-hand-3-tiles" class="face-down-tiles vertical"></div>
@@ -63,19 +69,27 @@
                 <div class="player-discards right-discards">
                     <div id="ai-discards-3" class="discard-area"></div>
                 </div>
+                <div class="called-sets">
+                    <div id="ai-called-sets-3"></div>
+                </div>
             </div>
 
-            <!-- Bottom Player (Human) -->
+            <!-- Bottom Player (Human in play mode, AI Player 0 in watch mode) -->
             <div class="player-area bottom-player">
                 <div class="player-info">
-                    <div class="player-label">You (Human)</div>
-                    <div class="hand-size">Hand: <span id="human-hand-size">-</span></div>
+                    <div class="player-label" id="bottom-player-label">You (Human)</div>
                 </div>
                 <div class="player-hand horizontal-hand">
                     <div id="human-hand" class="tiles-container horizontal"></div>
+                    <div id="ai-hand-0-tiles" class="face-down-tiles horizontal" style="display: none;"></div>
                 </div>
                 <div class="player-discards bottom-discards">
                     <div id="human-discards" class="discard-area"></div>
+                    <div id="ai-discards-0" class="discard-area" style="display: none;"></div>
+                </div>
+                <div class="called-sets">
+                    <div id="human-called-sets"></div>
+                    <div id="ai-called-sets-0" style="display: none;"></div>
                 </div>
             </div>
 

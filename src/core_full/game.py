@@ -19,12 +19,16 @@ except ImportError:
 
 class Suit(Enum):
     """Enum for tile suits"""
+    MANZU = 'm'
     PINZU = 'p'
     SOUZU = 's'
+    HONOR = 'z'  # Winds and Dragons
 
 
 class TileType(Enum):
-    """Enum for the 9 types of tiles (1-9)"""
+    """Enum for the 9 types of tiles (1-9).
+    For HONOR suit, values 1..7 map to: East, South, West, North, White, Green, Red.
+    """
     ONE = 1
     TWO = 2
     THREE = 3
@@ -97,6 +101,12 @@ class PassCall(Action):
 
 
 @dataclass
+class Riichi(Action):
+    """Action to declare Riichi (must accompany a discard)"""
+    discard_tile: 'Tile'
+
+
+@dataclass
 class CalledSet:
     """Represents a called set (pon or chi)"""
     tiles: List[Tile]  # All 3 tiles in the set
@@ -118,6 +128,12 @@ class GameState:
     last_discarded_tile: Optional[Tile] = None
     last_discard_player: Optional[int] = None
     can_call: bool = False  # Whether this player can make a call on the last discarded tile
+    # Extended Riichi state
+    round_wind: str = 'E'  # 'E' or 'S'
+    dealer_idx: int = 0
+    seat_winds: Dict[int, str] = field(default_factory=dict)  # {player_id: 'E'|'S'|'W'|'N'}
+    points: List[int] = field(default_factory=lambda: [25000, 25000, 25000, 25000])
+    riichi_declared: Dict[int, bool] = field(default_factory=dict)
 
 
 class Player:
@@ -127,6 +143,7 @@ class Player:
         self.player_id = player_id
         self.hand: List[Tile] = []
         self.called_sets: List[CalledSet] = []
+        self.riichi_declared: bool = False
     
     def play(self, game_state: GameState) -> Action:
         """
@@ -136,7 +153,7 @@ class Player:
         if not self.hand:
             return Tsumo()  # If no tiles, can't do anything but declare win
         
-        # Check if we can win with current hand (Tsumo)
+        # Check if we can win with current hand (Tsumo). Engine will validate yaku.
         if self.can_win():
             return Tsumo()
         
@@ -173,6 +190,40 @@ class Player:
             results['chi'] = chi_combinations
         
         return results
+
+    def is_closed_hand(self) -> bool:
+        return len(self.called_sets) == 0
+
+    def get_riichi_discard_options(self, game_state: GameState) -> List[Tile]:
+        """Return tiles that can be discarded to declare riichi (closed tenpai)."""
+        if not self.is_closed_hand():
+            return []
+        # Must have 14 tiles at start of turn (drawn tile in hand)
+        if len(self.hand) != 14:
+            return []
+        riichi_discards: List[Tile] = []
+        for idx, discard_tile in enumerate(list(self.hand)):
+            # simulate discard
+            self.remove_tile(discard_tile)
+            # now check if in tenpai: exists any draw that wins structurally
+            in_tenpai = False
+            for suit in [Suit.MANZU, Suit.PINZU, Suit.SOUZU, Suit.HONOR]:
+                max_val = 9 if suit != Suit.HONOR else 7
+                for val in range(1, max_val + 1):
+                    test_tile = Tile(suit, TileType(val))
+                    self.add_tile(test_tile)
+                    if self.can_win():
+                        in_tenpai = True
+                        self.remove_tile(test_tile)
+                        break
+                    self.remove_tile(test_tile)
+                if in_tenpai:
+                    break
+            # revert discard
+            self.add_tile(discard_tile)
+            if in_tenpai:
+                riichi_discards.append(discard_tile)
+        return riichi_discards
     
     def get_pon_combinations(self, discarded_tile: Tile) -> List[List[Tile]]:
         """Get all possible pon combinations with the discarded tile"""
@@ -192,7 +243,7 @@ class Player:
         combinations = []
         
         # Chi only works with number tiles (not honors)
-        if discarded_tile.tile_type.value < 1 or discarded_tile.tile_type.value > 9:
+        if discarded_tile.suit == Suit.HONOR:
             return combinations
         
         discarded_value = discarded_tile.tile_type.value
@@ -265,41 +316,61 @@ class Player:
     
     def can_win(self) -> bool:
         """
-        Check if the player can win with current hand + called sets
-        Need 4 sets of 3 tiles total (triplets like 333, or runs like 234)
+        Structural check only: 4 melds + 1 pair using current hand + called sets.
+        Does not check yaku; engine will enforce yaku for win validity.
         """
-        # Calculate total tiles needed: 4 sets of 3 = 12 tiles
-        # Already have sets from called sets
-        called_sets_count = len(self.called_sets)
-        remaining_sets_needed = 4 - called_sets_count
-        expected_hand_size = remaining_sets_needed * 3
-        
-        if len(self.hand) != expected_hand_size:
+        total_called_sets = len(self.called_sets)
+        remaining_melds_needed = 4 - total_called_sets
+        # Structural hand size should be: 14 - 3*called_sets
+        if len(self.hand) != 14 - 3 * total_called_sets:
             return False
-        
-        # If we have called sets and the right hand size, check if hand forms valid sets
-        if remaining_sets_needed == 0:
-            return True  # All sets are called sets
-        
-        # Group remaining hand tiles by suit
-        tiles_by_suit: Dict[Suit, List[Tile]] = {suit: [] for suit in Suit}
-        for tile in self.hand:
-            tiles_by_suit[tile.suit].append(tile)
-            
-        for suit, tiles in tiles_by_suit.items():
-            if len(tiles) % 3 != 0:
-                return False # Number of tiles in a suit must be multiple of 3
-
-            if len(tiles) > 0:
-                num_sets = len(tiles) // 3
-                tile_counts: Dict[int, int] = {}
-                for tile in tiles:
-                    tile_counts[tile.tile_type.value] = tile_counts.get(tile.tile_type.value, 0) + 1
-                
-                if not self._can_form_sets(tile_counts, num_sets):
+        # Try all possible pairs in concealed hand, then check meldability of remainder
+        tile_counts: Dict[Tuple[Suit, int], int] = {}
+        for t in self.hand:
+            key = (t.suit, t.tile_type.value)
+            tile_counts[key] = tile_counts.get(key, 0) + 1
+        # Prepare counters per suit for meldability test
+        def can_form_melds_without_pair(counts: Dict[Tuple[Suit, int], int], melds_needed: int) -> bool:
+            # Flatten by suit: numbers allow runs, honors only triplets
+            if melds_needed == 0:
+                # all remaining tiles must be zero
+                return all(c == 0 for c in counts.values())
+            # Find first tile with count>0
+            for (suit, val), cnt in list(counts.items()):
+                if cnt > 0:
+                    # Try triplet
+                    if cnt >= 3:
+                        counts[(suit, val)] -= 3
+                        if can_form_melds_without_pair(counts, melds_needed - 1):
+                            counts[(suit, val)] += 3
+                            return True
+                        counts[(suit, val)] += 3
+                    # Try run for number suits only
+                    if suit != Suit.HONOR and 1 <= val <= 7:
+                        if counts.get((suit, val), 0) > 0 and counts.get((suit, val + 1), 0) > 0 and counts.get((suit, val + 2), 0) > 0:
+                            counts[(suit, val)] -= 1
+                            counts[(suit, val + 1)] -= 1
+                            counts[(suit, val + 2)] -= 1
+                            if can_form_melds_without_pair(counts, melds_needed - 1):
+                                counts[(suit, val)] += 1
+                                counts[(suit, val + 1)] += 1
+                                counts[(suit, val + 2)] += 1
+                                return True
+                            counts[(suit, val)] += 1
+                            counts[(suit, val + 1)] += 1
+                            counts[(suit, val + 2)] += 1
+                    # If neither works, no solution from this branching
                     return False
-        
-        return True
+            return False
+        # Try every possible pair position
+        for (suit, val), cnt in list(tile_counts.items()):
+            if cnt >= 2:
+                tile_counts[(suit, val)] -= 2
+                if can_form_melds_without_pair(tile_counts, remaining_melds_needed):
+                    tile_counts[(suit, val)] += 2
+                    return True
+                tile_counts[(suit, val)] += 2
+        return False
 
     def can_ron(self, discarded_tile: Tile) -> bool:
         """
@@ -322,13 +393,14 @@ class Player:
     def get_possible_actions(self, game_state: GameState) -> Dict[str, List]:
         """
         Get all possible actions for this player given the current game state.
-        Returns a dict with keys: 'tsumo', 'ron', 'pon', 'chi'
+        Returns a dict with keys: 'tsumo', 'ron', 'pon', 'chi', 'riichi'
         """
         actions = {
             'tsumo': [],
             'ron': [],
             'pon': [],
-            'chi': []
+            'chi': [],
+            'riichi': []
         }
         
         # Check for Tsumo (can win with current hand on player's turn)
@@ -349,6 +421,11 @@ class Player:
             actions['pon'] = [[str(tile) for tile in tiles] for tiles in call_actions['pon']]
             actions['chi'] = [[str(tile) for tile in tiles] for tiles in call_actions['chi']]
         
+        # Check Riichi options (closed tenpai) if not already declared
+        if not getattr(self, 'riichi_declared', False):
+            riichi_discards = self.get_riichi_discard_options(game_state)
+            actions['riichi'] = [str(t) for t in riichi_discards]
+
         return actions
     
     def _can_form_sets(self, tile_counts: Dict[int, int], sets_needed: int) -> bool:
@@ -402,12 +479,19 @@ class Player:
         return False
 
 
-class SimpleJong:
-    """Simplified Mahjong game with Pinzu and Souzu tiles"""
+class FullRiichi:
+    """Full Riichi Mahjong engine (separate from SimpleJong).
+    Implements:
+    - Full tileset (manzu, pinzu, souzu, honors)
+    - 14-tile hands (4 melds + 1 pair for a win)
+    - Hanchan rounds (East 1-4, South 1-4); simplified dealer rotation
+    - Initial yaku detection: Riichi, Tanyao, Yakuhai, Honitsu, Chinitsu
+    - Simplified scoring: +2000 to winner (placeholder)
+    """
     
     def __init__(self, players: List[Player]):
         if len(players) != 4:
-            raise ValueError("SimpleJong requires exactly 4 players")
+            raise ValueError("FullRiichi requires exactly 4 players")
         
         self.players = players
         self.tiles: List[Tile] = []
@@ -417,40 +501,68 @@ class SimpleJong:
         self.winner = None
         self.last_discarded_tile = None
         self.last_discard_player = None
-        
-        # Initialize tiles: 4 copies of each tile type (1-9) for both suits
-        for suit in Suit:
+        # Riichi/hanchan state
+        self.round_wind: str = 'E'  # 'E' or 'S'
+        self.hand_number: int = 1   # 1..4
+        self.dealer_idx: int = 0    # East seat index
+        self.honba: int = 0
+        self.riichi_sticks: int = 0
+        self.points: List[int] = [25000, 25000, 25000, 25000]
+        # Initialize a fresh hand
+        self._init_tileset()
+        self._deal_new_hand()
+
+    def _init_tileset(self):
+        """Create full Riichi tileset (136 tiles)."""
+        self.tiles = []
+        # Numbered suits m/p/s: 1..9, 4 copies
+        for suit in [Suit.MANZU, Suit.PINZU, Suit.SOUZU]:
             for tile_type in TileType:
-                for _ in range(4):
-                    self.tiles.append(Tile(suit, tile_type))
-        
-        # Shuffle tiles
+                if 1 <= tile_type.value <= 9:
+                    for _ in range(4):
+                        self.tiles.append(Tile(suit, tile_type))
+        # Honors (z): 1..7, 4 copies (map to TileType 1..7)
+        for honor_val in range(1, 8):
+            for _ in range(4):
+                self.tiles.append(Tile(Suit.HONOR, TileType(honor_val)))
         random.shuffle(self.tiles)
-        
-        # Deal 11 tiles to each player
+
+    def _deal_new_hand(self):
+        """Deal 13 tiles to each player and reset per-hand state."""
+        # Reset per-hand state
+        for p in self.players:
+            p.hand = []
+            p.called_sets = []
+            p.riichi_declared = False
+        self.discarded_tiles = []
+        self.current_player_idx = self.dealer_idx
+        self.game_over = False
+        self.winner = None
+        self.last_discarded_tile = None
+        self.last_discard_player = None
+        # Shuffle if tiles insufficient (start new wall)
+        if len(self.tiles) < 52:  # safety: ensure enough tiles
+            self._init_tileset()
+        # Deal 13 each
         for player in self.players:
-            for _ in range(11):
-                if self.tiles:
-                    tile = self.tiles.pop()
-                    player.add_tile(tile)
-    
-    def get_game_state(self, player_id: int) -> GameState:
-        """Get game state for a specific player"""
-        player = self.players[player_id]
-        
-        # Get other players' discarded tiles
+            for _ in range(13):
+                tile = self.tiles.pop()
+                player.add_tile(tile)
+
+    def _get_seat_wind(self, player_idx: int) -> str:
+        offset = (player_idx - self.dealer_idx) % 4
+        return ['E', 'S', 'W', 'N'][offset]
+
+    def _build_game_state(self, player_id: int) -> GameState:
         other_players_discarded = {}
-        for i, p in enumerate(self.players):
+        for i, _ in enumerate(self.players):
             if i != player_id:
-                other_players_discarded[i] = [] # Simplified for now
-        
-        # Get called sets for all players
-        called_sets = {}
-        for i, p in enumerate(self.players):
-            called_sets[i] = p.called_sets.copy()
-        
+                other_players_discarded[i] = []
+        called_sets = {i: p.called_sets.copy() for i, p in enumerate(self.players)}
+        seat_winds = {i: self._get_seat_wind(i) for i in range(4)}
+        riichi_declared = {i: p.riichi_declared for i, p in enumerate(self.players)}
         return GameState(
-            player_hand=player.hand.copy(),
+            player_hand=self.players[player_id].hand.copy(),
             visible_tiles=self.discarded_tiles.copy(),
             remaining_tiles=len(self.tiles),
             player_id=player_id,
@@ -458,8 +570,17 @@ class SimpleJong:
             called_sets=called_sets,
             last_discarded_tile=self.last_discarded_tile,
             last_discard_player=self.last_discard_player,
-            can_call=self.last_discarded_tile is not None and self.last_discard_player != player_id
+            can_call=self.last_discarded_tile is not None and self.last_discard_player != player_id,
+            round_wind=self.round_wind,
+            dealer_idx=self.dealer_idx,
+            seat_winds=seat_winds,
+            points=self.points.copy(),
+            riichi_declared=riichi_declared,
         )
+    
+    def get_game_state(self, player_id: int) -> GameState:
+        """Get extended game state for a specific player"""
+        return self._build_game_state(player_id)
     
     def check_for_calls(self, discarded_tile: Tile, discard_player: int) -> Optional[Tuple[int, str, List[Tile]]]:
         """
@@ -514,9 +635,9 @@ class SimpleJong:
         self.last_discarded_tile = None
         self.last_discard_player = None
     
-    def play_round(self) -> Optional[int]:
+    def play_hand(self) -> Optional[int]:
         """
-        Play one round of the game
+        Play one hand of the game
         Returns the winner's player_id, or None if no winner
         """
         while not self.game_over and self.tiles:
@@ -532,15 +653,19 @@ class SimpleJong:
             
             # 3. Handle player's decision
             if isinstance(action, Tsumo):
-                # Player declared a win
-                self.winner = self.current_player_idx
-                self.game_over = True
-                return self.winner
+                # Validate yaku then award
+                if self._has_any_yaku(self.current_player_idx, is_ron=False):
+                    self.winner = self.current_player_idx
+                    self._award_win_points(self.current_player_idx, is_ron=False)
+                    self.game_over = True
+                    return self.winner
             elif isinstance(action, Ron):
-                # Player declared a Ron
-                self.winner = self.current_player_idx
-                self.game_over = True
-                return self.winner
+                # Validate yaku then award
+                if self.last_discarded_tile is not None and self._has_any_yaku(self.current_player_idx, is_ron=True):
+                    self.winner = self.current_player_idx
+                    self._award_win_points(self.current_player_idx, is_ron=True)
+                    self.game_over = True
+                    return self.winner
             elif isinstance(action, Discard):
                 # Player discarded a tile
                 current_player.remove_tile(action.tile)
@@ -549,8 +674,9 @@ class SimpleJong:
                 # Check if another player can win with the discarded tile (Ron)
                 for i, player in enumerate(self.players):
                     if i != self.current_player_idx:
-                        if player.can_ron(action.tile):
+                        if player.can_ron(action.tile) and self._has_any_yaku(i, is_ron=True):
                             self.winner = i
+                            self._award_win_points(i, is_ron=True)
                             self.game_over = True
                             # The tile is "claimed" by the Ron winner, so add it to their hand
                             player.add_tile(action.tile)
@@ -573,6 +699,108 @@ class SimpleJong:
         
         self.game_over = True
         return None
+
+    def play_hanchan(self):
+        """Play a full hanchan (E1-E4, S1-S4). Simplified dealer rotation without honba.
+        Returns final points list.
+        """
+        self.round_wind = 'E'
+        self.hand_number = 1
+        self.dealer_idx = 0
+        while True:
+            # Reset tiles and deal
+            self._init_tileset()
+            self._deal_new_hand()
+            winner = self.play_hand()
+            # Dealer repeats only if dealer wins (simplified; ignores draws/honba)
+            dealer_won = (winner == self.dealer_idx)
+            if not dealer_won:
+                # rotate dealer
+                self.dealer_idx = (self.dealer_idx + 1) % 4
+                if self.hand_number == 4:
+                    if self.round_wind == 'E':
+                        self.round_wind = 'S'
+                        self.hand_number = 1
+                    else:
+                        # Hanchan ends after South 4
+                        break
+                else:
+                    self.hand_number += 1
+            # If dealer won, repeat same hand number and round wind
+        return self.points
+
+    def _award_win_points(self, winner_idx: int, is_ron: bool):
+        """Placeholder scoring: +2000 to winner. No deductions for now."""
+        try:
+            self.points[winner_idx] += 2000
+        except Exception:
+            pass
+
+    def _has_any_yaku(self, player_idx: int, is_ron: bool) -> bool:
+        """Check if the player has any of the initial yaku on the (structurally) winning hand.
+        Yaku considered: Riichi, Tanyao, Yakuhai, Honitsu, Chinitsu.
+        """
+        tiles = self.players[player_idx].hand.copy()
+        # Combine with called sets tiles
+        for cs in self.players[player_idx].called_sets:
+            tiles.extend(cs.tiles)
+        # Riichi
+        yaku_found = False
+        if self.players[player_idx].riichi_declared:
+            yaku_found = True
+        # Tanyao: all tiles are simples (2..8) and no honors
+        if all(t.suit != Suit.HONOR and 2 <= t.tile_type.value <= 8 for t in tiles):
+            yaku_found = True
+        # Yakuhai: triplet of round wind, seat wind, or any dragon
+        if self._has_yakuhai(player_idx):
+            yaku_found = True
+        # Honitsu: tiles only from one suit plus honors (at least one from that suit)
+        if self._is_honitsu(player_idx):
+            yaku_found = True
+        # Chinitsu: tiles only from one numbered suit (no honors)
+        if self._is_chinitsu(player_idx):
+            yaku_found = True
+        return yaku_found
+
+    def _has_yakuhai(self, player_idx: int) -> bool:
+        tiles = self.players[player_idx].hand.copy()
+        for cs in self.players[player_idx].called_sets:
+            tiles.extend(cs.tiles)
+        counts: Dict[Tuple[Suit, int], int] = {}
+        for t in tiles:
+            key = (t.suit, t.tile_type.value)
+            counts[key] = counts.get(key, 0) + 1
+        # Round wind
+        round_map = {'E': 1, 'S': 2, 'W': 3, 'N': 4}
+        round_val = round_map[self.round_wind]
+        if counts.get((Suit.HONOR, round_val), 0) >= 3:
+            return True
+        # Seat wind
+        seat_val = round_map[self._get_seat_wind(player_idx)]
+        if counts.get((Suit.HONOR, seat_val), 0) >= 3:
+            return True
+        # Dragons: White(5), Green(6), Red(7)
+        for d in [5, 6, 7]:
+            if counts.get((Suit.HONOR, d), 0) >= 3:
+                return True
+        return False
+
+    def _is_honitsu(self, player_idx: int) -> bool:
+        tiles = self.players[player_idx].hand.copy()
+        for cs in self.players[player_idx].called_sets:
+            tiles.extend(cs.tiles)
+        suits = set(t.suit for t in tiles)
+        number_suits = {s for s in suits if s in (Suit.MANZU, Suit.PINZU, Suit.SOUZU)}
+        # one number suit + optionally HONOR
+        return (len(number_suits) == 1) and (Suit.HONOR in suits)
+
+    def _is_chinitsu(self, player_idx: int) -> bool:
+        tiles = self.players[player_idx].hand.copy()
+        for cs in self.players[player_idx].called_sets:
+            tiles.extend(cs.tiles)
+        suits = set(t.suit for t in tiles)
+        number_suits = {s for s in suits if s in (Suit.MANZU, Suit.PINZU, Suit.SOUZU)}
+        return (len(number_suits) == 1) and (Suit.HONOR not in suits)
     
     def get_winner(self) -> Optional[int]:
         """Get the winner's player_id, or None if no winner"""
@@ -590,7 +818,7 @@ class SimpleJong:
 class MCTSNode:
     """Node in the Monte Carlo Tree Search tree"""
     
-    def __init__(self, game_state: 'SimpleJong', player_id: int, parent=None, action=None):
+    def __init__(self, game_state: 'FullRiichi', player_id: int, parent=None, action=None):
         self.game_state = game_state
         self.player_id = player_id
         self.parent = parent
@@ -688,9 +916,9 @@ class MCTSNode:
         
         return child
     
-    def _copy_game_state(self) -> 'SimpleJong':
+    def _copy_game_state(self) -> 'FullRiichi':
         """Create a deep copy of the game state"""
-        # Create a new SimpleJong instance with copied players
+        # Create a new FullRiichi instance with copied players
         copied_players = []
         for player in self.game_state.players:
             # Create a new player of the same type
@@ -702,15 +930,11 @@ class MCTSNode:
             # Copy hand and called sets
             new_player.hand = player.hand.copy()
             new_player.called_sets = player.called_sets.copy()
+            new_player.riichi_declared = player.riichi_declared
             copied_players.append(new_player)
         
         # Create new game instance
-        new_game = SimpleJong(copied_players)
-        
-        # Override players' hands and called sets to avoid extra dealt tiles
-        for idx, orig_player in enumerate(self.game_state.players):
-            new_game.players[idx].hand = orig_player.hand.copy()
-            new_game.players[idx].called_sets = orig_player.called_sets.copy()
+        new_game = FullRiichi(copied_players)
         
         # Copy game state
         new_game.tiles = self.game_state.tiles.copy()
@@ -720,10 +944,16 @@ class MCTSNode:
         new_game.winner = self.game_state.winner
         new_game.last_discarded_tile = self.game_state.last_discarded_tile
         new_game.last_discard_player = self.game_state.last_discard_player
+        new_game.round_wind = self.game_state.round_wind
+        new_game.hand_number = self.game_state.hand_number
+        new_game.dealer_idx = self.game_state.dealer_idx
+        new_game.honba = self.game_state.honba
+        new_game.riichi_sticks = self.game_state.riichi_sticks
+        new_game.points = self.game_state.points.copy()
         
         return new_game
     
-    def _apply_action(self, game_state: 'SimpleJong', action: Action, player_id: int):
+    def _apply_action(self, game_state: 'FullRiichi', action: Action, player_id: int):
         """Apply an action to the game state"""
         player = game_state.players[player_id]
         
@@ -779,7 +1009,7 @@ class MCTSNode:
         # Return reward based on game outcome
         return self._get_reward(current_state, self.player_id)
     
-    def _select_random_action(self, player: 'Player', possible_actions: Dict[str, List], game_state: 'SimpleJong') -> Action:
+    def _select_random_action(self, player: 'Player', possible_actions: Dict[str, List], game_state: 'FullRiichi') -> Action:
         """Select a random action from possible actions"""
         # Priority: Tsumo > Ron > Pon > Chi > Discard
         
@@ -789,6 +1019,16 @@ class MCTSNode:
         if possible_actions.get('ron'):
             return Ron()
         
+        # Occasionally declare Riichi if possible
+        if possible_actions.get('riichi'):
+            if random.random() < 0.2 and possible_actions['riichi']:
+                # Choose a discard to riichi
+                tstr = random.choice(possible_actions['riichi'])
+                tile = Tile(Suit(tstr[-1]), TileType(int(tstr[:-1])))
+                # mark riichi
+                player.riichi_declared = True
+                return Discard(tile)
+
         # 30% chance to make a call if possible
         if random.random() < 0.3:
             if possible_actions.get('pon'):
@@ -804,7 +1044,7 @@ class MCTSNode:
         # Default: discard random tile
         return Discard(random.choice(player.hand))
     
-    def _get_reward(self, game_state: 'SimpleJong', player_id: int) -> float:
+    def _get_reward(self, game_state: 'FullRiichi', player_id: int) -> float:
         """Get reward for the player based on game outcome"""
         if not game_state.is_game_over():
             return 0.0  # Draw
@@ -846,29 +1086,11 @@ class PQNetwork:
         self.model = self._build_model()
     
     def _build_model(self):
-        """
-        Build the TensorFlow/Keras model with convolutional architecture
-
-        Policy heads design (tight policy space):
-        - policy_action (5): Categorical over action categories in this exact order:
-          [Discard, Ron, Tsumo, Pon, Chi]
-        - policy_tile1 (18): Categorical over tile types (1-9 for Pinzu and Souzu)
-          used to specify the tile for actions that operate on a single tile
-          (e.g., Discard Xp/Xs, Pon on tile type). For Ron/Tsumo, this head is ignored.
-        - policy_tile2 (18): Categorical over tile types used only for Chi, representing
-          the second tile from hand in the sequence call. Ignored for non-Chi actions.
-
-        Inference-time action scoring examples:
-        - Discard 3p: P(Discard) * P(tile1=3p)
-        - Ron: P(Ron)
-        - Tsumo: P(Tsumo)
-        - Pon on 5s: P(Pon) * P(tile1=5s)
-        - Chi using [2s,4s] with last discard 3s: P(Chi) * P(tile1=2s) * P(tile2=4s)
-        """
+        """Build the TensorFlow/Keras model with convolutional architecture"""
         
         # Input layers
-        # Hand inputs: (batch_size, 12, 5) - 12 tiles, 5 features (4 embedding + 1 called flag)
-        hand_inputs = keras.Input(shape=(12, 5), name='hand_inputs')
+        # Hand inputs: (batch_size, 14, 5) - 14 tiles, 5 features (4 embedding + 1 called flag)
+        hand_inputs = keras.Input(shape=(14, 5), name='hand_inputs')
         
         # Discard pile inputs: (batch_size, max_turns, embedding_dim) for each player
         discard_inputs = []
@@ -928,49 +1150,32 @@ class PQNetwork:
         x = layers.Dropout(0.3)(x)
         
         # 7. Output heads
-        # Tight policy space with explicit heads
-        policy_action_head = layers.Dense(5, activation='softmax', name='policy_action')
-        policy_tile1_head = layers.Dense(18, activation='softmax', name='policy_tile1')
-        policy_tile2_head = layers.Dense(18, activation='softmax', name='policy_tile2')
-
-        policy_action = policy_action_head(x)
-        policy_tile1 = policy_tile1_head(x)
-        policy_tile2 = policy_tile2_head(x)
+        policy_head = layers.Dense(200, activation='softmax', name='policy')(x)
         value_head = layers.Dense(1, activation='tanh', name='value')(x)
         
         # Create model
         inputs = [hand_inputs] + discard_inputs + [game_state_input]
-        model = keras.Model(
-            inputs=inputs,
-            outputs=[policy_action, policy_tile1, policy_tile2, value_head]
-        )
+        model = keras.Model(inputs=inputs, outputs=[policy_head, value_head])
         
         # Compile model
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=0.001),
             loss={
-                'policy_action': 'categorical_crossentropy',
-                'policy_tile1': 'categorical_crossentropy',
-                'policy_tile2': 'categorical_crossentropy',
+                'policy': 'categorical_crossentropy',
                 'value': 'mse'
             },
             metrics={
-                'policy_action': 'accuracy',
-                'policy_tile1': 'accuracy',
-                'policy_tile2': 'accuracy',
+                'policy': 'accuracy',
                 'value': 'mae'
             }
         )
         
         return model
     
-    def evaluate(self, game_state: 'GameState') -> Tuple[Dict[str, np.ndarray], float]:
+    def evaluate(self, game_state: 'GameState') -> Tuple[np.ndarray, float]:
         """
         Evaluate a game state and return (policy, value)
-        policy: dict containing three heads:
-          - 'action': np.ndarray shape (5,)
-          - 'tile1': np.ndarray shape (18,)
-          - 'tile2': np.ndarray shape (18,)
+        policy: probability distribution over all possible actions
         value: estimated state value (-1 to 1)
         """
         # Extract features
@@ -987,18 +1192,14 @@ class PQNetwork:
                 batched_features.append(np.expand_dims(feature, axis=0))
         
         # Get predictions
-        pred_action, pred_tile1, pred_tile2, value = self.model.predict(batched_features, verbose=0)
-        policy = {
-            'action': pred_action[0],
-            'tile1': pred_tile1[0],
-            'tile2': pred_tile2[0]
-        }
-        return policy, float(value[0][0])
+        policy, value = self.model.predict(batched_features, verbose=0)
+        
+        return policy[0], float(value[0][0])
     
     def _extract_features(self, game_state: 'GameState') -> List[np.ndarray]:
         """Extract features from game state using the new convolutional architecture"""
         
-        # 1. Hand features: (12, 5) - 12 tiles, 5 features (4 embedding + 1 called flag)
+        # 1. Hand features: (14, 5)
         hand_features = self._encode_hand_convolutional(game_state.player_hand, game_state.called_sets.get(game_state.player_id, []))
         
         # 2. Discard pile features: (max_turns, embedding_dim) for each player
@@ -1013,9 +1214,8 @@ class PQNetwork:
         return [hand_features] + discard_features + [game_state_features]
     
     def _encode_hand_convolutional(self, hand: List[Tile], called_sets: List['CalledSet']) -> np.ndarray:
-        """Encode hand as (12, 5) tensor for convolutional processing"""
-        # Initialize with zeros: (12, 5) - 12 tiles, 5 features (4 embedding + 1 called flag)
-        hand_tensor = np.zeros((12, 5))
+        """Encode hand as (14, 5) tensor for convolutional processing"""
+        hand_tensor = np.zeros((14, 5))
         
         # Create a set of called tiles for quick lookup
         called_tiles = set()
@@ -1024,7 +1224,7 @@ class PQNetwork:
                 called_tiles.add(tile)
         
         # Fill in the hand tensor
-        for i, tile in enumerate(hand[:12]):  # Limit to 12 tiles
+        for i, tile in enumerate(hand[:14]):  # Limit to 14 tiles
             # Get tile embedding (first 4 features)
             tile_embedding = self._get_tile_embedding(tile)
             hand_tensor[i, :4] = tile_embedding
@@ -1077,14 +1277,23 @@ class PQNetwork:
     
     def _get_tile_index(self, tile: Tile) -> int:
         """Get index for a tile in the embedding matrix"""
-        return (tile.tile_type.value - 1) * 2 + (0 if tile.suit == Suit.PINZU else 1)
+        # Create indices across suits: m(0..8)->0..8, p(0..8)->9..17, s(0..8)->18..26, honors(1..7)->27..33
+        if tile.suit == Suit.MANZU:
+            return (tile.tile_type.value - 1)
+        if tile.suit == Suit.PINZU:
+            return 9 + (tile.tile_type.value - 1)
+        if tile.suit == Suit.SOUZU:
+            return 18 + (tile.tile_type.value - 1)
+        # HONOR
+        honor_val = min(tile.tile_type.value, 7)
+        return 27 + (honor_val - 1)
     
     def _extract_additional_features(self, game_state: 'GameState') -> np.ndarray:
         """Extract additional game state features"""
         features = []
         
-        # Remaining tiles count (normalized)
-        features.append(game_state.remaining_tiles / 72.0)
+        # Remaining tiles count (normalized to 136)
+        features.append(game_state.remaining_tiles / 136.0)
         
         # Can call feature
         features.append(1.0 if game_state.can_call else 0.0)
@@ -1102,7 +1311,7 @@ class PQNetwork:
         features.append(total_opponent_sets / 12.0)  # Max 12 total opponent sets
         
         # Number of visible tiles
-        features.append(len(game_state.visible_tiles) / 72.0)
+        features.append(len(game_state.visible_tiles) / 136.0)
         
         # Last discarded tile features
         if game_state.last_discarded_tile:
@@ -1127,64 +1336,47 @@ class PQNetwork:
     
     def get_action_probabilities(self, game_state: 'GameState', possible_actions: Dict[str, List]) -> Dict[str, float]:
         """
-        Get probability distribution over possible actions using the multi-head policy.
-        Returns dict mapping action strings to probabilities.
+        Get probability distribution over possible actions
+        Returns dict mapping action strings to probabilities
         """
         policy, _ = self.evaluate(game_state)
-
-        def tile_to_index_from_str(tile_str: str) -> int:
-            # tile_str like '3p' or '5s'
-            tile_type = int(tile_str[:-1])
-            suit = Suit(tile_str[-1])
-            return self._get_tile_index(Tile(suit, TileType(tile_type)))
-
-        action_category_order = ['discard', 'ron', 'tsumo', 'pon', 'chi']
-        action_idx = {name: i for i, name in enumerate(action_category_order)}
-
-        action_probs: Dict[str, float] = {}
-
-        # Tsumo and Ron (no tile heads needed)
+        
+        # Map policy to action probabilities
+        action_probs = {}
+        
+        # Tsumo
         if possible_actions.get('tsumo'):
-            action_probs['tsumo'] = float(policy['action'][action_idx['tsumo']])
+            action_probs['tsumo'] = policy[0] if len(policy) > 0 else 0.0
+        
+        # Ron
         if possible_actions.get('ron'):
-            action_probs['ron'] = float(policy['action'][action_idx['ron']])
-
+            action_probs['ron'] = policy[1] if len(policy) > 1 else 0.0
+        
+        # Pon calls
+        pon_idx = 2
+        for tiles in possible_actions.get('pon', []):
+            if pon_idx < len(policy):
+                action_probs[f'pon_{"_".join(str(t) for t in tiles)}'] = policy[pon_idx]
+            pon_idx += 1
+        
+        # Chi calls
+        for tiles in possible_actions.get('chi', []):
+            if pon_idx < len(policy):
+                action_probs[f'chi_{"_".join(str(t) for t in tiles)}'] = policy[pon_idx]
+            pon_idx += 1
+        
         # Discards
         for tile in game_state.player_hand:
-            tile_idx = self._get_tile_index(tile)
-            prob = float(policy['action'][action_idx['discard']]) * float(policy['tile1'][tile_idx])
-            action_probs[f'discard_{str(tile)}'] = prob
-
-        # Pon calls (use last discarded tile to set tile1)
-        if possible_actions.get('pon'):
-            last_tile = game_state.last_discarded_tile
-            if last_tile is not None:
-                lt_idx = self._get_tile_index(last_tile)
-                base = float(policy['action'][action_idx['pon']]) * float(policy['tile1'][lt_idx])
-                for tiles in possible_actions['pon']:
-                    # tiles is list of strings representing two tiles from hand
-                    key = f"pon_{'_'.join(str(t) for t in tiles)}"
-                    action_probs[key] = base
-
-        # Chi calls (use two tiles from hand for tile1 and tile2)
-        if possible_actions.get('chi'):
-            base_action = float(policy['action'][action_idx['chi']])
-            for tiles in possible_actions['chi']:
-                # tiles is list like ['2s','4s']
-                try:
-                    t1_idx = tile_to_index_from_str(tiles[0])
-                    t2_idx = tile_to_index_from_str(tiles[1])
-                    prob = base_action * float(policy['tile1'][t1_idx]) * float(policy['tile2'][t2_idx])
-                    key = f"chi_{'_'.join(str(t) for t in tiles)}"
-                    action_probs[key] = prob
-                except Exception:
-                    continue
-
+            if pon_idx < len(policy):
+                action_probs[f'discard_{str(tile)}'] = policy[pon_idx]
+            pon_idx += 1
+        
         # Normalize probabilities
         total_prob = sum(action_probs.values())
         if total_prob > 0:
-            for k in list(action_probs.keys()):
-                action_probs[k] /= total_prob
+            for action in action_probs:
+                action_probs[action] /= total_prob
+        
         return action_probs
     
     def save_model(self, filepath: str):
@@ -1199,12 +1391,10 @@ class PQNetwork:
             filepath += '.keras'
         self.model = keras.models.load_model(filepath)
     
-    def train(self, training_data: List[Tuple['GameState', Any, float]], epochs: int = 10, batch_size: int = 32):
+    def train(self, training_data: List[Tuple['GameState', np.ndarray, float]], epochs: int = 10, batch_size: int = 32):
         """
         Train the model on provided data
         training_data: List of (game_state, target_policy, target_value) tuples
-          - target_policy can be either a dict with keys {'action','tile1','tile2'}
-            or a single 1D vector of length 41 (5 + 18 + 18), which will be split.
         """
         if not training_data:
             return
@@ -1213,9 +1403,7 @@ class PQNetwork:
         hand_inputs = []
         discard_inputs = [[] for _ in range(4)]
         game_state_inputs = []
-        y_action = []
-        y_tile1 = []
-        y_tile2 = []
+        y_policy = []
         y_value = []
         
         for game_state, target_policy, target_value in training_data:
@@ -1226,37 +1414,20 @@ class PQNetwork:
                 discard_inputs[i].append(features[i + 1])
             game_state_inputs.append(features[-1])
             
-            # Accept dict or concatenated vector
-            if isinstance(target_policy, dict):
-                y_action.append(target_policy['action'])
-                y_tile1.append(target_policy['tile1'])
-                y_tile2.append(target_policy['tile2'])
-            else:
-                # Assume 1D vector of length 41: [5 | 18 | 18]
-                tp = np.asarray(target_policy)
-                y_action.append(tp[:5])
-                y_tile1.append(tp[5:23])
-                y_tile2.append(tp[23:41])
+            y_policy.append(target_policy)
             y_value.append([target_value])
         
         # Convert to numpy arrays
         hand_inputs = np.array(hand_inputs)
         discard_inputs = [np.array(discards) for discards in discard_inputs]
         game_state_inputs = np.array(game_state_inputs)
-        y_action = np.array(y_action)
-        y_tile1 = np.array(y_tile1)
-        y_tile2 = np.array(y_tile2)
+        y_policy = np.array(y_policy)
         y_value = np.array(y_value)
         
         # Train the model
         self.model.fit(
             [hand_inputs] + discard_inputs + [game_state_inputs],
-            {
-                'policy_action': y_action,
-                'policy_tile1': y_tile1,
-                'policy_tile2': y_tile2,
-                'value': y_value
-            },
+            {'policy': y_policy, 'value': y_value},
             epochs=epochs,
             batch_size=batch_size,
             verbose=1
@@ -1266,22 +1437,18 @@ class PQNetwork:
 class AIPlayer(Player):
     """AI player using MCTS with neural network value estimation"""
     
-    def __init__(self, player_id: int, simulation_count: int = 1000, exploration_constant: float = 1.414, enable_pq: bool = False, pq_network: Optional['PQNetwork'] = None):
+    def __init__(self, player_id: int, simulation_count: int = 1000, exploration_constant: float = 1.414):
         super().__init__(player_id)
         self.simulation_count = simulation_count
         self.exploration_constant = exploration_constant
         
         # Initialize PQNetwork for policy and value estimation (if available)
         self.pq_network: Optional[PQNetwork] = None
-        if enable_pq and TENSORFLOW_AVAILABLE:
-            # Use provided network if supplied
-            if pq_network is not None:
-                self.pq_network = pq_network
-            else:
-                try:
-                    self.pq_network = PQNetwork(hidden_size=64, embedding_dim=4, max_turns=20)
-                except Exception:
-                    self.pq_network = None
+        if TENSORFLOW_AVAILABLE:
+            try:
+                self.pq_network = PQNetwork(hidden_size=64, embedding_dim=4, max_turns=20)
+            except Exception:
+                self.pq_network = None
         self.current_game = None
     
     def play(self, game_state: GameState) -> Action:
@@ -1348,14 +1515,13 @@ class AIPlayer(Player):
         # Return best action
         return root.get_best_action()
     
-    def _create_game_copy(self, game_state: GameState) -> 'SimpleJong':
+    def _create_game_copy(self, game_state: GameState) -> 'FullRiichi':
         """Create a copy of the game state for MCTS"""
         # Create new players
         copied_players = []
         for i in range(4):
             if i == self.player_id:
-                # Disable PQ for copied players to keep simulations lightweight
-                new_player = AIPlayer(i, self.simulation_count, self.exploration_constant, enable_pq=False)
+                new_player = AIPlayer(i, self.simulation_count, self.exploration_constant)
             else:
                 new_player = Player(i)
             
@@ -1363,23 +1529,17 @@ class AIPlayer(Player):
             if i == self.player_id:
                 new_player.hand = game_state.player_hand.copy()
                 new_player.called_sets = game_state.called_sets.get(i, []).copy()
+                new_player.riichi_declared = game_state.riichi_declared.get(i, False)
             else:
                 # For other players, we don't have full information, so we'll use empty hands
                 new_player.hand = []
                 new_player.called_sets = game_state.called_sets.get(i, []).copy()
+                new_player.riichi_declared = game_state.riichi_declared.get(i, False)
             
             copied_players.append(new_player)
         
         # Create new game instance
-        new_game = SimpleJong(copied_players)
-        
-        # Override players' hands and called sets to avoid extra dealt tiles
-        for i in range(4):
-            if i == self.player_id:
-                new_game.players[i].hand = game_state.player_hand.copy()
-            else:
-                new_game.players[i].hand = []
-            new_game.players[i].called_sets = game_state.called_sets.get(i, []).copy()
+        new_game = FullRiichi(copied_players)
         
         # Copy game state
         new_game.tiles = []  # We don't have full information about remaining tiles
@@ -1389,9 +1549,12 @@ class AIPlayer(Player):
         new_game.winner = None
         new_game.last_discarded_tile = game_state.last_discarded_tile
         new_game.last_discard_player = game_state.last_discard_player
+        new_game.round_wind = game_state.round_wind
+        new_game.dealer_idx = game_state.dealer_idx
+        new_game.points = game_state.points.copy()
         
         return new_game
     
-    def set_game_state(self, game_state: 'SimpleJong'):
+    def set_game_state(self, game_state: 'FullRiichi'):
         """Set the current game state for MCTS"""
         self.current_game = game_state
