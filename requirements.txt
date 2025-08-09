@@ -11,3 +11,6 @@ tensorflow-metal==1.1.0; platform_system == "Darwin" and platform_machine == "ar
 tensorflow==2.15.0; platform_system != "Darwin" or platform_machine != "arm64"
 
 tqdm==4.66.1
+
+# Fast sparse one-hot construction for dataset encoding
+scipy==1.10.1

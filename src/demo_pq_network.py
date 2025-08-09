@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.game import (
-    PQNetwork, GameState, Tile, TileType, Suit, CalledSet, TENSORFLOW_AVAILABLE
+    PQNetwork, GamePerspective, Tile, TileType, Suit, CalledSet, TENSORFLOW_AVAILABLE
 )
 
 
@@ -32,7 +32,7 @@ def demo_pq_network():
     
     # Create a sample game state
     print("Creating sample game state...")
-    game_state = GameState(
+    game_state = GamePerspective(
         player_hand=[
             Tile(Suit.PINZU, TileType.ONE),
             Tile(Suit.PINZU, TileType.TWO),

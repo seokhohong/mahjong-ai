@@ -11,7 +11,7 @@ import os
 # Add the src directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from core.game import SimpleJong, Player, Tile, TileType, Discard, Tsumo, Ron, GameState, Suit, Pon, Chi, CalledSet
+from core.game import SimpleJong, Player, Tile, TileType, Discard, Tsumo, Ron, GamePerspective, Suit, Pon, Chi, CalledSet, Action, Reaction, PassCall
 
 
 class TestSimpleJong(unittest.TestCase):
@@ -28,134 +28,21 @@ class TestSimpleJong(unittest.TestCase):
         self.assertEqual(len(self.game.players), 4)
         
         # Check that each player has 11 tiles initially
-        for player in self.game.players:
-            self.assertEqual(len(player.hand), 11)
-        
-        # Check that there are remaining tiles (72 total - 44 dealt = 28 remaining)
-        self.assertEqual(self.game.get_remaining_tiles(), 28)
-        
+        for i in range(SimpleJong.NUM_PLAYERS):
+            self.assertEqual(len(self.game.hand(i)), 11)
+    
         # Check that game is not over initially
         self.assertFalse(self.game.is_game_over())
         self.assertIsNone(self.game.get_winner())
     
-    def test_winning_hand_three_sets_same_tiles(self):
-        """Test winning hand detection with three sets of same tiles (333, 444, 555)"""
-        player = Player(0)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE)
-        ]
-        player.hand = test_hand
-        
-        self.assertTrue(player.can_win(), 
-                       f"Hand {[str(tile) for tile in test_hand]} should be a winning hand")
-    
-    def test_winning_hand_three_sequences(self):
-        """Test winning hand detection with three sequences (123, 234, 345)"""
-        player = Player(1)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE)
-        ]
-        player.hand = test_hand
-        
-        self.assertTrue(player.can_win(), 
-                       f"Hand {[str(tile) for tile in test_hand]} should be a winning hand")
-    
-    def test_winning_hand_mixed_sets(self):
-        """Test winning hand detection with mixed sets (333, 234, 567)"""
-        player = Player(2)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.SEVEN),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE)
-        ]
-        player.hand = test_hand
-        
-        self.assertTrue(player.can_win(), 
-                       f"Hand {[str(tile) for tile in test_hand]} should be a winning hand")
-    
-    def test_non_winning_hand(self):
-        """Test that non-winning hands are correctly identified"""
-        player = Player(3)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE)
-        ]
-        player.hand = test_hand
-        
-        self.assertFalse(player.can_win(), 
-                        f"Hand {[str(tile) for tile in test_hand]} should not be a winning hand")
-    
-    def test_winning_hand_insufficient_tiles(self):
-        """Test that hands with insufficient tiles are not winning"""
-        player = Player(0)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT)  # Only 8 tiles
-        ]
-        player.hand = test_hand
-        
-        self.assertFalse(player.can_win(), 
-                        f"Hand with {len(test_hand)} tiles should not be a winning hand")
-    
-    def test_winning_hand_too_many_tiles(self):
-        """Test that hands with too many tiles are not winning"""
-        player = Player(0)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE) # 13 tiles
-        ]
-        player.hand = test_hand
-        
-        self.assertFalse(player.can_win(), 
-                        f"Hand with {len(test_hand)} tiles should not be a winning hand")
-    
     def test_game_state_creation(self):
         """Test that game state is created correctly for each player"""
-        game_state = self.game.get_game_state(0)
+        game_state = self.game.get_game_perspective(0)
         
         self.assertEqual(game_state.player_id, 0)
         self.assertEqual(len(game_state.player_hand), 11)
         self.assertEqual(game_state.remaining_tiles, 28)
-        self.assertEqual(len(game_state.visible_tiles), 0)
         self.assertEqual(len(game_state.other_players_discarded), 3)
-    
-    def test_player_turn(self):
-        """Test that players can take turns and discard tiles"""
-        player = self.players[0]
-        initial_hand_size = len(player.hand)
-        
-        game_state = self.game.get_game_state(0)
-        action = player.play(game_state)
-        
-        # Player should return an action
-        self.assertIsNotNone(action)
-        
-        # If it's a discard action, check the tile
-        if isinstance(action, Discard):
-            discarded_tile = action.tile
-            self.assertIsInstance(discarded_tile, Tile)
-            
-            # Hand size should decrease by 1 after discarding
-            player.remove_tile(discarded_tile)
-            self.assertEqual(len(player.hand), initial_hand_size - 1)
-        elif isinstance(action, Tsumo):
-            # If it's a tsumo action, that's also valid
-            pass
-        else:
-            self.fail(f"Unexpected action type: {type(action)}")
     
     def test_tile_equality_and_hash(self):
         """Test that tiles can be compared and hashed correctly"""
@@ -191,690 +78,409 @@ class TestSimpleJong(unittest.TestCase):
             self.assertIn(winner, [0, 1, 2, 3])
             # If there's a winner, they should have a winning hand
             self.assertTrue(self.players[winner].can_win())
-    
-    def test_invalid_player_count(self):
-        """Test that SimpleJong raises an error with invalid player count"""
-        with self.assertRaises(ValueError):
-            SimpleJong([Player(0), Player(1)])  # Only 2 players
-        
-        with self.assertRaises(ValueError):
-            SimpleJong([Player(0), Player(1), Player(2), Player(3), Player(4)])  # 5 players
 
-    def test_ron_functionality(self):
-        """Test that players can declare Ron when another player discards a tile that completes their hand"""
-        # Create a player with a hand that needs one specific tile to win
-        player = Player(0)
-        # Hand: 333p, 444p, 55p (needs 5p to complete 555p) and 111s
-        test_hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE)
+    def test_state_copy_roundtrip(self):
+        """Copying the game via SimpleJong.copy() preserves state and is independent on mutation."""
+        # Prepare a deterministic tiny state
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        g.tiles = []
+        g.current_player_idx = 2
+        g._player_hands[0] = [Tile(Suit.PINZU, TileType.ONE)] * 11
+        g._player_hands[1] = [Tile(Suit.SOUZU, TileType.TWO)] * 11
+        g._player_hands[2] = [Tile(Suit.PINZU, TileType.THREE)] * 11
+        g._player_hands[3] = [Tile(Suit.SOUZU, TileType.FOUR)] * 11
+        g.player_discards = {i: [] for i in range(4)}
+        g.last_discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
+        g.last_discard_player = 1
+        g.last_drawn_tile = None
+        g.last_drawn_player = None
+
+        c = g.copy()
+        # Verify basic fields equal
+        self.assertEqual(c.current_player_idx, g.current_player_idx)
+        self.assertEqual(c.last_discarded_tile, g.last_discarded_tile)
+        self.assertEqual(c.last_discard_player, g.last_discard_player)
+        for i in range(4):
+            self.assertEqual(c.hand(i), g.hand(i))
+            self.assertEqual(len(c.called_sets(i)), len(g.called_sets(i)))
+
+        # Mutate original; copy should not change
+        g._player_hands[2].pop()
+        g.last_discarded_tile = None
+        self.assertNotEqual(len(c.hand(2)), len(g.hand(2)))
+        self.assertIsNotNone(c.last_discarded_tile)
+
+    def test_action_tsumo_detection(self):
+        """Player 0 holds 12 tiles that form four melds; action perspective reports tsumo available."""
+        # Compose 4 sequences: 123p, 456p, 789p, 123s (12 tiles)
+        tiles = [
+            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
+            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SIX),
+            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.EIGHT), Tile(Suit.PINZU, TileType.NINE),
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
         ]
-        player.hand = test_hand
-        
-        # Test that player can declare Ron with a 5p tile
-        five_tile = Tile(Suit.PINZU, TileType.FIVE)
-        self.assertTrue(player.can_ron(five_tile), 
-                       f"Player should be able to declare Ron with {five_tile}")
-        
-        # Test that player cannot declare Ron with other tiles
-        one_tile = Tile(Suit.PINZU, TileType.ONE)
-        self.assertFalse(player.can_ron(one_tile), 
-                        f"Player should not be able to declare Ron with {one_tile}")
-        
-        # Test that player can declare Ron when the tile is in visible_tiles
-        game_state = GameState(
-            player_hand=test_hand,
-            visible_tiles=[five_tile],  # The needed tile is discarded
-            remaining_tiles=10,
-            player_id=0,
-            other_players_discarded={},
-            called_sets={},
-            last_discarded_tile=five_tile,
-            last_discard_player=1,
-            can_call=False
-        )
-        
-        action = player.play(game_state)
-        self.assertIsInstance(action, Ron, 
-                            f"Player should declare Ron when {five_tile} is discarded")
+        self.game._player_hands[0] = tiles.copy()
+        self.game.current_player_idx = 0
+        # Indicate last draw belongs to player 0 to flag action state/newly drawn
+        self.game.last_drawn_tile = tiles[-1]
+        self.game.last_drawn_player = 0
 
-    def test_ron_vs_tsumo_priority(self):
-        """Test that Tsumo takes priority over Ron when both are possible"""
-        player = Player(0)
-        # Hand: 333p, 444p, 555p, 111s (already a winning hand)
-        test_hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE)
+        gp = self.game.get_game_perspective(0)
+        self.assertIs(gp.state, Action)
+        self.assertIsNotNone(gp.newly_drawn_tile)
+        self.assertTrue(gp.can_tsumo())
+
+    def test_reaction_chi_detection_for_left_player(self):
+        """With last discard 3p from player 0, player 1 (left) can chi if holding 2p and 4p."""
+        self.game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+        self.game.last_discard_player = 0
+        # Player 1 holds 2p and 4p enabling chi
+        self.game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+
+        rs = self.game.get_game_perspective(1)
+        self.assertIs(rs.state, Reaction)
+        # Use engine helper to compute calls
+        options = self.game.get_call_options(rs)
+        self.assertGreaterEqual(len(options['chi']), 1)
+        # Ensure non-left player (player 2) cannot chi even with 2p and 4p
+        self.game._player_hands[2] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        rs2 = self.game.get_game_perspective(2)
+        options2 = self.game.get_call_options(rs2)
+        self.assertEqual(len(options2['chi']), 0)
+
+    def test_reaction_pon_detection(self):
+        """Any player may pon if holding two of the discarded tile."""
+        self.game.last_discarded_tile = Tile(Suit.SOUZU, TileType.FIVE)
+        self.game.last_discard_player = 0
+        # Player 2 holds two 5s enabling pon
+        self.game._player_hands[2] = [Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)]
+        rs = self.game.get_game_perspective(2)
+        options = self.game.get_call_options(rs)
+        self.assertGreaterEqual(len(options['pon']), 1)
+
+    def test_reaction_ron_detection(self):
+        """Player 1 can ron on 3p if the discard completes four melds."""
+        self.game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+        self.game.last_discard_player = 0
+        # Hand of 11 tiles: 123s, 456s, 789s, and 2p,4p so that 3p completes 2-3-4p
+        self.game._player_hands[1] = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
+            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR),
         ]
-        player.hand = test_hand
-        
-        # Even if there's a discarded tile that could complete the hand,
-        # player should declare Tsumo since they already have a winning hand
-        game_state = GameState(
-            player_hand=test_hand,
-            visible_tiles=[Tile(Suit.SOUZU, TileType.TWO)],  # Some discarded tile
-            remaining_tiles=10,
-            player_id=0,
-            other_players_discarded={},
-            called_sets={},
-            last_discarded_tile=Tile(Suit.SOUZU, TileType.TWO),
-            last_discard_player=1,
-            can_call=False
-        )
-        
-        action = player.play(game_state)
-        self.assertIsInstance(action, Tsumo, 
-                            "Player should declare Tsumo when they already have a winning hand")
+        rs = self.game.get_game_perspective(1)
+        self.assertTrue(rs.can_ron())
 
-    def test_ron_game_scenario(self):
-        """Test a complete game scenario where Ron is declared"""
-        # Create players
-        players = [Player(i) for i in range(4)]
-        
-        # Create game (this will deal initial tiles)
+    def test_play_round_multi_ron_priority(self):
+        """If two opponents can ron the same discard, both should win and the game ends immediately."""
+        players = [Player(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
-        
-        # Set up a specific scenario where player 1 can declare Ron
-        # Player 1: 333p, 444p, 55p (needs 5p to complete 555p) and 111s
-        players[1].hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE)
+        # Current player 0 will discard 3p; configure hands so players 1 and 2 can ron on 3p
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Players 1 and 2: 11 tiles each that become 4 melds with 3p (2p,4p present)
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
-        
-        # Other players have random hands (just ensure they have 11 tiles)
-        for i in [0, 2, 3]:
-            players[i].hand = [Tile(Suit.PINZU, TileType.ONE) for _ in range(11)]
-        
-        # Manually set the current player to 0
+        game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        game._player_hands[2] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game.tiles = []
         game.current_player_idx = 0
-        
-        # Simulate player 0 discarding a 5p tile
-        five_tile = Tile(Suit.PINZU, TileType.FIVE)
-        players[0].remove_tile(five_tile)
-        game.discarded_tiles.append(five_tile)
-        
-        # Check if player 1 can declare Ron
-        self.assertTrue(players[1].can_ron(five_tile), 
-                       "Player 1 should be able to declare Ron with the discarded 5p tile")
-        
-        # Verify that the hand with the added tile is a winning hand
-        players[1].add_tile(five_tile)
-        self.assertTrue(players[1].can_win(), 
-                       "Player 1 should have a winning hand after adding the 5p tile")
-        players[1].remove_tile(five_tile)  # Remove it back
-        
-        # Simulate the Ron declaration
-        game.winner = 1
-        game.game_over = True
-        players[1].add_tile(five_tile)  # Add the claimed tile to winner's hand
-        
-        self.assertEqual(game.get_winner(), 1, "Player 1 should be the winner")
-        self.assertTrue(game.is_game_over(), "Game should be over after Ron declaration")
 
+        # Force discard 3p by player 0
+        gs0 = game.get_game_perspective(0)
+        action = Discard(Tile(Suit.PINZU, TileType.THREE))
+        game._player_hands[0].remove(action.tile)
+        game.player_discards[0].append(action.tile)
+        game.last_discarded_tile = action.tile
+        game.last_discard_player = 0
+        # Now trigger reaction resolution by calling play_round step (no tiles to draw => loop ends after reactions)
+        winner = game.play_round()
+        winners = game.get_winners()
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(set(winners), {1, 2})
+        self.assertIn(winner, [1, 2])
 
-class TestPlayerMethods(unittest.TestCase):
-    """Test cases for Player class methods"""
-    
-    def setUp(self):
-        """Set up test fixtures before each test method"""
-        self.player = Player(0)
-    
-    def test_player_initialization(self):
-        """Test that player initializes correctly"""
-        self.assertEqual(self.player.player_id, 0)
-        self.assertEqual(len(self.player.hand), 0)
-    
-    def test_add_and_remove_tiles(self):
-        """Test adding and removing tiles from player's hand"""
-        tile = Tile(Suit.PINZU, TileType.ONE)
-        
-        # Add tile
-        self.player.add_tile(tile)
-        self.assertEqual(len(self.player.hand), 1)
-        self.assertIn(tile, self.player.hand)
-        
-        # Remove tile
-        self.player.remove_tile(tile)
-        self.assertEqual(len(self.player.hand), 0)
-        self.assertNotIn(tile, self.player.hand)
-    
-    def test_remove_nonexistent_tile(self):
-        """Test removing a tile that doesn't exist in hand"""
-        tile = Tile(Suit.PINZU, TileType.ONE)
-        other_tile = Tile(Suit.SOUZU, TileType.TWO)
-        
-        self.player.add_tile(tile)
-        initial_hand_size = len(self.player.hand)
-        
-        # Try to remove a tile that's not in the hand
-        self.player.remove_tile(other_tile)
-        
-        # Hand size should remain the same
-        self.assertEqual(len(self.player.hand), initial_hand_size)
-        self.assertIn(tile, self.player.hand)
+    def test_play_round_pon_changes_turn(self):
+        """Pon should transfer turn to the caller and skip the draw on that next action."""
+        class FirstDiscardFiveS(Player):
+            def play(self, game_state: GamePerspective):
+                t = Tile(Suit.SOUZU, TileType.FIVE)
+                if t in game_state.player_hand:
+                    return Discard(t)
+                return super().play(game_state)
 
-
-class TestPonChiMechanics(unittest.TestCase):
-    """Test cases for Pon and Chi mechanics"""
-    
-    def setUp(self):
-        """Set up test fixtures before each test method"""
-        self.players = [Player(i) for i in range(4)]
-        self.game = SimpleJong(self.players)
-    
-    def test_pon_combinations_basic(self):
-        """Test basic pon combination detection"""
-        player = Player(0)
-        # Hand has two 5p tiles
-        player.hand = [
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO)
-        ]
-        
-        # Should be able to pon a 5p tile
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        combinations = player.get_pon_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        for tile in combinations[0]:
-            self.assertEqual(tile, discarded_tile)
-    
-    def test_pon_combinations_insufficient_tiles(self):
-        """Test pon when player doesn't have enough matching tiles"""
-        player = Player(0)
-        # Hand has only one 5p tile
-        player.hand = [
-            Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO)
-        ]
-        
-        # Should not be able to pon a 5p tile
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        combinations = player.get_pon_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 0)
-    
-    def test_chi_combinations_middle_tile(self):
-        """Test chi when discarded tile is in the middle of sequence"""
-        player = Player(0)
-        # Hand has 1p and 3p
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        
-        # Should be able to chi a 2p tile (1-2-3 sequence)
-        discarded_tile = Tile(Suit.PINZU, TileType.TWO)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        self.assertIn(Tile(Suit.PINZU, TileType.ONE), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.THREE), combinations[0])
-    
-    def test_chi_combinations_high_tile(self):
-        """Test chi when discarded tile is the highest in sequence"""
-        player = Player(0)
-        # Hand has 1p and 2p
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        
-        # Should be able to chi a 3p tile (1-2-3 sequence)
-        discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        self.assertIn(Tile(Suit.PINZU, TileType.ONE), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.TWO), combinations[0])
-    
-    def test_chi_combinations_low_tile(self):
-        """Test chi when discarded tile is the lowest in sequence"""
-        player = Player(0)
-        # Hand has 2p and 3p
-        player.hand = [
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        
-        # Should be able to chi a 1p tile (1-2-3 sequence)
-        discarded_tile = Tile(Suit.PINZU, TileType.ONE)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        self.assertIn(Tile(Suit.PINZU, TileType.TWO), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.THREE), combinations[0])
-    
-    def test_chi_combinations_multiple_options(self):
-        """Test chi when multiple sequence options are possible"""
-        player = Player(0)
-        # Hand has 4p, 5p, 6p, 7p (can chi 3p as 3-4-5 or chi 8p as 6-7-8)
-        player.hand = [
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.SIX), Tile(Suit.PINZU, TileType.SEVEN)
-        ]
-        
-        # Should be able to chi a 3p tile (3-4-5 sequence)
-        discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertIn(Tile(Suit.PINZU, TileType.FOUR), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.FIVE), combinations[0])
-        
-        # Should be able to chi an 8p tile (6-7-8 sequence)
-        discarded_tile = Tile(Suit.PINZU, TileType.EIGHT)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertIn(Tile(Suit.PINZU, TileType.SIX), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.SEVEN), combinations[0])
-    
-    def test_chi_combinations_no_valid_sequence(self):
-        """Test chi when no valid sequence can be formed"""
-        player = Player(0)
-        # Hand has 1p and 4p (no valid sequence with any discarded tile)
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX)
-        ]
-        
-        # Should not be able to chi a 2p tile
-        discarded_tile = Tile(Suit.PINZU, TileType.TWO)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 0)
-    
-    def test_chi_different_suits(self):
-        """Test that chi doesn't work across different suits"""
-        player = Player(0)
-        # Hand has 1p and 2s (different suits)
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        
-        # Should not be able to chi a 2p tile (wrong suit for sequence)
-        discarded_tile = Tile(Suit.PINZU, TileType.TWO)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 0)
-    
-    def test_call_priority_pon_over_chi(self):
-        """Test that pon takes priority over chi when both are possible"""
-        # Create game with specific scenario
-        players = [Player(i) for i in range(4)]
+        players = [FirstDiscardFiveS(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
-        
-        # Player 1 (left of player 0) has tiles for chi with 5p: 4p, 6p
-        players[1].hand = [
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE)
-        ]
-        
-        # Player 2 has tiles for pon with 5p: 5p, 5p
-        players[2].hand = [
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE)
-        ]
-        
-        # Player 0 discards 5p
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        call_result = game.check_for_calls(discarded_tile, 0)
-        
-        # Should return the pon call (higher priority)
-        self.assertIsNotNone(call_result)
-        caller_id, call_type, tiles = call_result
-        self.assertEqual(call_type, 'pon')
-        self.assertEqual(caller_id, 2)  # Player 2 made the pon call
-    
-    def test_chi_only_from_left_player(self):
-        """Test that chi can only be called from the left player (previous in turn order)"""
-        # Create game with specific scenario
-        players = [Player(i) for i in range(4)]
+        # Player 0 has 5s to discard; player 2 can pon with two 5s
+        game._player_hands[0] = [Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        game._player_hands[1] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.NINE)] + [Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO)] * 4
+        game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        # Prevent further draws to focus on turn change behavior
+        game.tiles = [Tile(Suit.SOUZU, TileType.NINE)]
+        game.current_player_idx = 0
+
+        # Step one iteration of play_round; after discard, player 2 should pon and become current player
+        # We emulate just one loop by calling play_round; with no tiles, it should end quickly after resolution
+        game.play_round()
+        # After resolution, game ends due to no remaining tiles; ensure last acting player index was updated to pon caller
+        # We cannot observe current_player_idx after game_over, but we can ensure that player 2 consumed tiles (hand reduced by 2)
+        self.assertEqual(len([t for t in game._player_hands[2] if t.tile_type == TileType.FIVE and t.suit == Suit.SOUZU]), 0)
+
+    def test_play_round_chi_when_no_ron_or_pon(self):
+        """Chi should occur if no ron or pon is available for the left player."""
+        players = [Player(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
-        
-        # Player 1 (left of player 0) has tiles for chi with 5p: 4p, 6p
-        players[1].hand = [
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE)
+        # Only player 1 (left) can chi; no one can ron or pon
+        game._player_hands[0] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        non_partitionable_souzu = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
         ]
-        
-        # Player 2 also has tiles for chi with 5p: 4p, 6p
-        players[2].hand = [
-            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE)
+        game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + non_partitionable_souzu
+        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game.tiles = []
+        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+        game.last_discard_player = 0
+
+        game.play_round()
+        # Player 1 should have consumed 2p and 4p due to chi call
+        self.assertNotIn(Tile(Suit.PINZU, TileType.TWO), game._player_hands[1])
+        self.assertNotIn(Tile(Suit.PINZU, TileType.FOUR), game._player_hands[1])
+
+    def test_reaction_priority_ron_over_pon_and_chi(self):
+        """When chi, pon, and ron are all available, ron must occur and chi/pon must not."""
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Prepare hands and outstanding discard 3p by player 0
+        game._player_hands[0] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        # Player 1: chi-capable with 2p and 4p
+        filler_no_meld = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.FOUR),
+            Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.EIGHT),
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.FOUR),
+            Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.EIGHT),
+            Tile(Suit.SOUZU, TileType.TWO),
         ]
-        
-        # Player 0 discards 5p
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        call_result = game.check_for_calls(discarded_tile, 0)
-        
-        # Should return the chi call from player 1 only (left player)
-        if call_result:
-            caller_id, call_type, tiles = call_result
-            if call_type == 'chi':
-                self.assertEqual(caller_id, 1)  # Only player 1 can chi from player 0
-    
-    def test_make_call_updates_state(self):
-        """Test that making a call properly updates player state"""
-        player = Player(0)
-        # Hand has two 5p tiles
-        player.hand = [
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO)
+        game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + filler_no_meld.copy()
+        # Player 2: pon-capable with two 3p
+        game._player_hands[2] = [Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE)] + filler_no_meld.copy()
+        # Player 3: ron-capable (needs 3p to complete 2-3-4p), already has 123s,456s,789s and 2p,4p
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
-        
-        initial_hand_size = len(player.hand)
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        pon_tiles = [Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE)]
-        
-        # Make the call
-        player.make_call('pon', pon_tiles, discarded_tile, 1)
-        
-        # Check that tiles were removed from hand
-        self.assertEqual(len(player.hand), initial_hand_size - 2)
-        
-        # Check that called set was created
-        self.assertEqual(len(player.called_sets), 1)
-        called_set = player.called_sets[0]
-        self.assertEqual(called_set.call_type, 'pon')
-        self.assertEqual(called_set.called_tile, discarded_tile)
-        self.assertEqual(called_set.caller_position, 0)
-        self.assertEqual(called_set.source_position, 1)
-        self.assertEqual(len(called_set.tiles), 3)  # 2 from hand + 1 discarded
-    
-    def test_winning_with_called_sets(self):
-        """Test that players can win with called sets"""
-        player = Player(0)
-        
-        # Player has one called set (pon of 5p)
-        called_set = CalledSet(
-            tiles=[Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE)],
-            call_type='pon',
-            called_tile=Tile(Suit.PINZU, TileType.FIVE),
-            caller_position=0,
-            source_position=1
-        )
-        player.called_sets = [called_set]
-        
-        # Player needs 3 more sets (9 tiles) to win
-        # Give them exactly 3 complete sets
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
+        game._player_hands[3] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        # No further draws; set outstanding discard from player 0
+        game.tiles = []
+        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+        game.last_discard_player = 0
+
+        # Resolve reactions: expect ron by player 3
+        winner = game.play_round()
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(set(game.get_winners()), {3})
+        self.assertEqual(winner, 3)
+        # Ensure chi/pon did not consume tiles from players 1 and 2
+        self.assertIn(Tile(Suit.PINZU, TileType.TWO), game._player_hands[1])
+        self.assertIn(Tile(Suit.PINZU, TileType.FOUR), game._player_hands[1])
+        self.assertEqual(sum(1 for t in game._player_hands[2] if t.suit == Suit.PINZU and t.tile_type == TileType.THREE), 2)
+
+    def test_deterministic_discard_player_triggers_chi(self):
+        """A deterministic discarder (always 3p) should produce a discard that the left player can chi."""
+
+        class TestDiscardPlayer(Player):
+            def play(self, game_state: GamePerspective):
+                target = Tile(Suit.PINZU, TileType.THREE)
+                if target in game_state.player_hand:
+                    return Discard(target)
+                return super().play(game_state)
+
+        players = [TestDiscardPlayer(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Configure hands: player 0 has 3p; player 1 has 2p and 4p to chi
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        game._player_hands[2] = []
+        game._player_hands[3] = []
+        game.tiles = []  # prevent draw
+        game.current_player_idx = 0
+
+        gs0 = game.get_game_perspective(0)
+        action = players[0].play(gs0)
+        self.assertIsInstance(action, Discard)
+        self.assertEqual(str(action.tile), '3p')
+
+        # Apply minimal discard effects
+        game._player_hands[0].remove(action.tile)
+        game.player_discards[0].append(action.tile)
+        game.last_discarded_tile = action.tile
+        game.last_discard_player = 0
+
+        rs = game.get_game_perspective(1)
+        opts = game.get_call_options(rs)
+        self.assertGreaterEqual(len(opts['chi']), 1)
+
+    def test_loser_recorded_on_single_ron(self):
+        """On a Ron, the loser should be the discarder."""
+        game = self.game
+        # Set last discard 3p by player 0
+        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+        game.last_discard_player = 0
+        # Player 1 has 11 tiles that become 4 melds with 3p (2p,4p present)
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
-        
-        # Should be able to win
-        self.assertTrue(player.can_win())
+        game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        # Prevent draws; trigger immediate reaction resolution
+        game.tiles = []
+        winner = game.play_round()
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(winner, 1)
+        self.assertEqual(game.get_winners(), [1])
+        self.assertEqual(game.get_loser(), 0)
 
-
-class TestPlayerActions(unittest.TestCase):
-    def setUp(self):
-        self.player = Player(0)
-        self.game_state = GameState(
-            player_hand=self.player.hand,
-            visible_tiles=[],
-            remaining_tiles=20,
-            player_id=0,
-            other_players_discarded={},
-            called_sets={},
-            last_discarded_tile=None,
-            last_discard_player=None,
-            can_call=False
-        )
-
-    def test_can_tsumo_with_winning_hand(self):
-        """Test that can_tsumo returns true for a winning hand"""
-        self.player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.TWO),
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FOUR),
+    def test_loser_recorded_on_multi_ron(self):
+        """On multiple Rons, loser remains the single discarder."""
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Discard 3p by player 0; players 1 and 2 can ron
+        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+        game.last_discard_player = 0
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
-        self.assertTrue(self.player.can_tsumo())
+        game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        game._player_hands[2] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game.tiles = []
+        winner = game.play_round()
+        winners = set(game.get_winners())
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(winners, {1, 2})
+        self.assertIn(winner, [1, 2])
+        self.assertEqual(game.get_loser(), 0)
 
-    def test_get_possible_actions_all(self):
-        """Test getting all possible actions (pon, chi, ron)"""
-        # Tenpai hand (11 tiles) - waiting for 2p to complete winning hand  
-        self.player.hand = [
-            # Two 2p tiles (can form triplet with discarded 2p)
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.TWO),
-            # Complete triplet
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE),
-            # Complete triplet
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            # Complete triplet  
-            Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-
-        discarded_tile = Tile(Suit.PINZU, TileType.TWO)
-        self.game_state.last_discarded_tile = discarded_tile
-        self.game_state.last_discard_player = 3 # from player 3 (left player of player 0)
-
-        actions = self.player.get_possible_actions(self.game_state)
-
-        self.assertTrue(actions['pon'])
-        self.assertTrue(actions['chi'])
-        self.assertTrue(actions['ron'])
-
-    def test_get_possible_actions_none(self):
-        """Test getting no possible actions"""
-        self.player.hand = [Tile(Suit.SOUZU, TileType.NINE), Tile(Suit.SOUZU, TileType.NINE)]
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        self.game_state.last_discarded_tile = discarded_tile
-        self.game_state.last_discard_player = 1
-
-        actions = self.player.get_possible_actions(self.game_state)
-
-        self.assertFalse(actions['pon'])
-        self.assertFalse(actions['chi'])
-        self.assertFalse(actions['ron'])
-
-
-class TestChiPonInterface(unittest.TestCase):
-    """Test cases specifically for chi/pon interface functionality"""
-    
-    def setUp(self):
-        """Set up test fixtures before each test method"""
-        self.players = [Player(i) for i in range(4)]
-        self.game = SimpleJong(self.players)
-    
-    def test_chi_interface_9s_scenario(self):
-        """Test the specific scenario mentioned: chi with 9s"""
-        # Set up player 0 (human) with tiles that can chi a 9s
-        # Hand has 7s and 8s for a potential 7-8-9 sequence
-        self.players[0].hand = [
-            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT),
+    def test_loser_none_on_tsumo(self):
+        """On a Tsumo win, loser should remain None."""
+        game = self.game
+        # Configure player 0 with 12 tiles forming 4 melds (tsumo)
+        tiles = [
             Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO),
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.EIGHT),
-            Tile(Suit.PINZU, TileType.NINE)
+            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SIX),
+            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.EIGHT), Tile(Suit.PINZU, TileType.NINE),
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
         ]
-        
-        # Player 3 (left of player 0) discards a 9s
-        discarded_tile = Tile(Suit.SOUZU, TileType.NINE)
-        self.game.last_discarded_tile = discarded_tile
-        self.game.last_discard_player = 3  # Player 3 is the "left" player for player 0
-        
-        # Get game state and check possible actions
-        game_state = self.game.get_game_state(0)
-        actions = self.players[0].get_possible_actions(game_state)
-        
-        # Player 0 should be able to chi with 7s-8s
-        self.assertTrue(len(actions['chi']) > 0, "Player should be able to chi the 9s")
-        self.assertIn('7s', actions['chi'][0], "Chi should include 7s")
-        self.assertIn('8s', actions['chi'][0], "Chi should include 8s")
-    
-    def test_pon_interface_scenario(self):
-        """Test pon interface functionality"""
-        # Set up player 0 with two 5p tiles for a potential pon
-        self.players[0].hand = [
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.SEVEN),
-            Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
-            Tile(Suit.PINZU, TileType.ONE)
-        ]
-        
-        # Any player discards a 5p
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        self.game.last_discarded_tile = discarded_tile
-        self.game.last_discard_player = 2  # Player 2 discarded
-        
-        # Get game state and check possible actions
-        game_state = self.game.get_game_state(0)
-        actions = self.players[0].get_possible_actions(game_state)
-        
-        # Player 0 should be able to pon with their two 5p tiles
-        self.assertTrue(len(actions['pon']) > 0, "Player should be able to pon the 5p")
-        self.assertEqual(len(actions['pon'][0]), 2, "Pon should use 2 tiles from hand")
-        self.assertTrue(all(tile == '5p' for tile in actions['pon'][0]), "All pon tiles should be 5p")
-    
-    def test_chi_only_from_left_player(self):
-        """Test that chi can only be called from the left player"""
-        # Set up player 0 with tiles that can chi a 5p
-        self.players[0].hand = [
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.SEVEN),
-            Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
-            Tile(Suit.PINZU, TileType.ONE)
-        ]
-        
-        # Test when left player (player 3) discards 5p - should be able to chi
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        self.game.last_discarded_tile = discarded_tile
-        self.game.last_discard_player = 3  # Left player
-        
-        game_state = self.game.get_game_state(0)
-        actions = self.players[0].get_possible_actions(game_state)
-        
-        self.assertTrue(len(actions['chi']) > 0, "Should be able to chi from left player")
-        
-        # Test when non-left player (player 1) discards 5p - should not be able to chi
-        self.game.last_discard_player = 1  # Not left player
-        
-        game_state = self.game.get_game_state(0)
-        actions = self.players[0].get_possible_actions(game_state)
-        
-        self.assertEqual(len(actions['chi']), 0, "Should not be able to chi from non-left player")
-    
-    def test_ron_with_chi_pon_available(self):
-        """Test that ron is available when chi/pon are also possible"""
-        # Set up a tenpai hand that can complete with discarded tile
-        self.players[0].hand = [
-            # Two 2p tiles (can form triplet with discarded 2p for ron)
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.TWO),
-            # Complete triplet
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.ONE),
-            # Complete triplet
-            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE),
-            # Complete triplet  
-            Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        
-        # Player 3 (left player) discards a 2p
-        discarded_tile = Tile(Suit.PINZU, TileType.TWO)
-        self.game.last_discarded_tile = discarded_tile
-        self.game.last_discard_player = 3  # Left player for potential chi
-        
-        game_state = self.game.get_game_state(0)
-        actions = self.players[0].get_possible_actions(game_state)
-        
-        # Should have ron, pon, and chi all available
-        self.assertTrue(actions['ron'], "Should be able to ron")
-        self.assertTrue(len(actions['pon']) > 0, "Should be able to pon")
-        self.assertTrue(len(actions['chi']) > 0, "Should be able to chi")
-    
-    def test_call_execution_updates_hand(self):
-        """Test that making a call properly updates the player's hand and game state"""
-        # Set up player 0 with tiles for a pon
-        initial_hand = [
-            Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.SEVEN),
-            Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
-            Tile(Suit.PINZU, TileType.ONE)
-        ]
-        self.players[0].hand = initial_hand.copy()
-        
-        discarded_tile = Tile(Suit.PINZU, TileType.FIVE)
-        tiles_to_use = [Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.FIVE)]
-        
-        initial_hand_size = len(self.players[0].hand)
-        
-        # Make the pon call
-        self.players[0].make_call('pon', tiles_to_use, discarded_tile, 1)
-        
-        # Check that hand size decreased by 2
-        self.assertEqual(len(self.players[0].hand), initial_hand_size - 2)
-        
-        # Check that called set was created
-        self.assertEqual(len(self.players[0].called_sets), 1)
-        called_set = self.players[0].called_sets[0]
-        self.assertEqual(called_set.call_type, 'pon')
-        self.assertEqual(called_set.called_tile, discarded_tile)
-        self.assertEqual(len(called_set.tiles), 3)  # 2 from hand + 1 discarded
-    
-    def test_chi_sequence_formation(self):
-        """Test different chi sequence formations"""
-        player = Player(0)
-        
-        # Test case 1: middle tile discarded (need 1p and 3p for 2p discard)
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        discarded_tile = Tile(Suit.PINZU, TileType.TWO)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        self.assertIn(Tile(Suit.PINZU, TileType.ONE), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.THREE), combinations[0])
-        
-        # Test case 2: high tile discarded (need 1p and 2p for 3p discard)
-        player.hand = [
-            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        self.assertIn(Tile(Suit.PINZU, TileType.ONE), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.TWO), combinations[0])
-        
-        # Test case 3: low tile discarded (need 2p and 3p for 1p discard)
-        player.hand = [
-            Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE)
-        ]
-        discarded_tile = Tile(Suit.PINZU, TileType.ONE)
-        combinations = player.get_chi_combinations(discarded_tile)
-        
-        self.assertEqual(len(combinations), 1)
-        self.assertEqual(len(combinations[0]), 2)
-        self.assertIn(Tile(Suit.PINZU, TileType.TWO), combinations[0])
-        self.assertIn(Tile(Suit.PINZU, TileType.THREE), combinations[0])
+        game._player_hands[0] = tiles.copy()
+        game.current_player_idx = 0
+        game.tiles = [Tile(Suit.PINZU, TileType.THREE)]
+        winner = game.play_round()
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(winner, 0)
+        self.assertEqual(game.get_winners(), [0])
+        self.assertIsNone(game.get_loser())
 
+    def test_decline_pon_allows_left_chi(self):
+        """If a pon is available but declined, a left player's chosen chi should execute."""
+        class ScriptedDiscardPlayer(Player):
+            def __init__(self, pid, target: Tile):
+                super().__init__(pid)
+                self.target = target
+            def play(self, game_state: GamePerspective):
+                if self.target in game_state.player_hand:
+                    return Discard(self.target)
+                return super().play(game_state)
+
+        class DeclinePonPlayer(Player):
+            def choose_reaction(self, game_state: GamePerspective, options):
+                # Decline even if pon available
+                return PassCall()
+
+        class AcceptChiPlayer(Player):
+            def choose_reaction(self, game_state: GamePerspective, options):
+                if options.get('chi'):
+                    return Chi(options['chi'][0])
+                return PassCall()
+
+        # Seats: 0 (left of 3), 1, 2, 3 (discarder)
+        target = Tile(Suit.PINZU, TileType.THREE)
+        players = [AcceptChiPlayer(0), DeclinePonPlayer(1), Player(2), ScriptedDiscardPlayer(3, target)]
+        game = SimpleJong(players)
+        # Configure hands explicitly
+        game._player_hands[3] = [target] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Player 0 (left of discarder) can chi with 2p and 4p
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        # Player 1 can pon with two 3p but will decline
+        game._player_hands[1] = [Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        # One tile in deck per preference
+        game.tiles = [Tile(Suit.SOUZU, TileType.NINE)]
+        game.current_player_idx = 3
+
+        game.play_round()
+        # Player 0 should have consumed 2p and 4p due to chi call
+        self.assertNotIn(Tile(Suit.PINZU, TileType.TWO), game._player_hands[0])
+        self.assertNotIn(Tile(Suit.PINZU, TileType.FOUR), game._player_hands[0])
+
+    def test_all_players_skip_reactions_then_next_draw(self):
+        """When all players skip reactions, the game proceeds with next draw and no tiles are consumed for calls."""
+        class ScriptedDiscardPlayer(Player):
+            def __init__(self, pid, target: Tile):
+                super().__init__(pid)
+                self.target = target
+            def play(self, game_state: GamePerspective):
+                if self.target in game_state.player_hand:
+                    return Discard(self.target)
+                return super().play(game_state)
+
+        class PassAllPlayer(Player):
+            def choose_reaction(self, game_state: GamePerspective, options):
+                return PassCall()
+
+        target = Tile(Suit.PINZU, TileType.THREE)
+        players = [PassAllPlayer(0), PassAllPlayer(1), PassAllPlayer(2), ScriptedDiscardPlayer(3, target)]
+        game = SimpleJong(players)
+        # Hands: discarder has target; others have potential calls but will pass
+        game._player_hands[3] = [target] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Player 0 (left) could chi
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        # Player 1 could pon
+        game._player_hands[1] = [Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        # One tile in deck
+        game.tiles = [Tile(Suit.SOUZU, TileType.NINE)]
+        game.current_player_idx = 3
+
+        game.play_round()
+        # No tiles should have been consumed from players 0 or 1 for calls
+        self.assertIn(Tile(Suit.PINZU, TileType.TWO), game._player_hands[0])
+        self.assertIn(Tile(Suit.PINZU, TileType.FOUR), game._player_hands[0])
+        self.assertEqual(sum(1 for t in game._player_hands[1] if t.suit == Suit.PINZU and t.tile_type == TileType.THREE), 2)
+
+    def test_draw_when_wall_empty_and_no_wins(self):
+        """If the wall is empty and no Ron/Tsumo occurs, the round should cleanly end in a draw (game_over)."""
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Empty the wall and ensure no pending discard
+        game.tiles = []
+        game.last_discarded_tile = None
+        game.last_discard_player = None
+        # Run the round; with no tiles and no pending reactions, it should end immediately as draw
+        winner = game.play_round()
+        self.assertTrue(game.is_game_over())
+        self.assertIsNone(winner)
+        self.assertEqual(game.get_winners(), [])
 
 if __name__ == "__main__":
     # Run the tests

@@ -6,144 +6,142 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from core.game import (
-    SimpleJong, AIPlayer, Player, Tile, TileType, Suit, 
-    Tsumo, Ron, Discard, Pon, Chi, GameState
+    SimpleJong, Player, MCTSNode, SimpleHeuristicsPlayer,
+    Tile, TileType, Suit, Discard, Ron, Pon, Chi, Tsumo,
 )
 
 
 class TestMCTSAI(unittest.TestCase):
-    """Test cases for MCTS AI implementation"""
+    """Tests for MCTSNode and heuristic player behavior"""
     
     def setUp(self):
         """Set up test fixtures"""
-        # Create 4 AI players
-        self.players = [
-            AIPlayer(0, simulation_count=1),
-            AIPlayer(1, simulation_count=1),
-            AIPlayer(2, simulation_count=1),
-            AIPlayer(3, simulation_count=1)
-        ]
-        
-        # Create game
+        self.players = [Player(0), Player(1), Player(2), Player(3)]
         self.game = SimpleJong(self.players)
     
-    def test_ai_player_creation(self):
-        """Test that AIPlayer can be created"""
-        ai_player = AIPlayer(0)
-        self.assertEqual(ai_player.player_id, 0)
-        self.assertEqual(ai_player.simulation_count, 1000)
-        self.assertEqual(ai_player.exploration_constant, 1.414)
-        # PQNetwork may be None if TensorFlow is not available
-        self.assertTrue(hasattr(ai_player, 'pq_network'))
-    
-    def test_ai_player_immediate_win(self):
-        """Test that AI player declares win when possible"""
-        # Set up a winning hand for player 0 (12 tiles = 4 sets of 3)
-        ai_player = self.players[0]
-        ai_player.hand = [
-            # Set 1: Triplet of 1p
-            Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.ONE),
-            # Set 2: Run 2s-3s-4s
-            Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR),
-            # Set 3: Triplet of 5p
-            Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.FIVE),
-            # Set 4: Run 6s-7s-8s
-            Tile(Suit.SOUZU, TileType.SIX),
-            Tile(Suit.SOUZU, TileType.SEVEN),
-            Tile(Suit.SOUZU, TileType.EIGHT),
-        ]
-        
-        game_state = self.game.get_game_state(0)
-        action = ai_player.play(game_state)
-        
-        self.assertIsInstance(action, Tsumo)
-    
-    def test_ai_player_ron(self):
-        """Test that AI player declares Ron when possible"""
-        ai_player = self.players[0]
-        
-        # Set up a hand that can win with a specific tile (11 tiles)
-        ai_player.hand = [
-            # Set 1: Triplet of 1p
-            Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.ONE),
-            # Set 2: Run 2s-3s-4s
-            Tile(Suit.SOUZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR),
-            # Set 3: Triplet of 5p
-            Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.FIVE),
-            # Need one more tile to complete the 4th set
-            Tile(Suit.SOUZU, TileType.SIX),
-            Tile(Suit.SOUZU, TileType.SEVEN),
-        ]
-        
-        # Set up game state with a discarded tile that can complete the hand
-        game_state = GameState(
-            player_hand=ai_player.hand.copy(),
-            visible_tiles=[Tile(Suit.SOUZU, TileType.EIGHT)],
-            remaining_tiles=50,
-            player_id=0,
-            other_players_discarded={},
-            called_sets={},
-            last_discarded_tile=Tile(Suit.SOUZU, TileType.EIGHT),
-            last_discard_player=1,
-            can_call=True
-        )
-        
-        action = ai_player.play(game_state)
-        self.assertIsInstance(action, Ron)
-    
-    def test_ai_player_discard(self):
-        """Test that AI player discards when no win is possible"""
-        ai_player = self.players[0]
-        
-        # Set up a hand that can't win (11 tiles, not forming 4 sets)
-        ai_player.hand = [
-            Tile(Suit.PINZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.TWO),
-            Tile(Suit.SOUZU, TileType.THREE),
-            Tile(Suit.SOUZU, TileType.FOUR),
-            Tile(Suit.PINZU, TileType.FIVE),
-            Tile(Suit.PINZU, TileType.SIX),
-            Tile(Suit.SOUZU, TileType.SEVEN),
-            Tile(Suit.SOUZU, TileType.EIGHT),
-            Tile(Suit.PINZU, TileType.NINE),
-            Tile(Suit.SOUZU, TileType.ONE),
-            Tile(Suit.PINZU, TileType.TWO),
-        ]
-        
-        game_state = self.game.get_game_state(0)
-        action = ai_player.play(game_state)
-        
-        self.assertIsInstance(action, Discard)
-        # Check that the discarded tile was actually in the hand
-        self.assertIn(action.tile, ai_player.hand)
-    
     def test_mcts_node_creation(self):
-        """Test that MCTS nodes can be created"""
-        from core.game import MCTSNode
-        
         node = MCTSNode(self.game, 0)
         self.assertEqual(node.player_id, 0)
         self.assertEqual(node.visits, 0)
         self.assertEqual(node.value, 0.0)
-        self.assertIsNotNone(node.untried_actions)
+        self.assertIsInstance(node.untried_actions, list)
     
-    def test_pq_network_optional(self):
-        """AIPlayer should expose pq_network attribute, which may be None without TF"""
-        ai_player = AIPlayer(0)
-        # No strict assertions on value; just ensure attribute exists
-        _ = ai_player.pq_network
+    def test_expand_prefers_ron(self):
+        # Player 0 discarded 3p; player 1 can ron
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        g._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
+        ]
+        g._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        g.tiles = []
+        g.current_player_idx = 0
+        g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
+        node = MCTSNode(g, player_id=1)
+        child = node.expand()
+        self.assertIsInstance(child.action, Ron)
+    
+    def test_expand_prefers_pon_then_chi(self):
+        # Prepare last discard 5s; actor 2 can pon
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        g._player_hands[0] = [Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Hand for player 2 avoids forming four melds even after adding 5s (prevents Ron)
+        g._player_hands[2] = [
+            Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
+            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.NINE)
+        ]
+        g.tiles = []
+        g.current_player_idx = 0
+        g.step(0, Discard(Tile(Suit.SOUZU, TileType.FIVE)))
+        node = MCTSNode(g, player_id=2)
+        child = node.expand()
+        self.assertIsInstance(child.action, Pon)
+        # Chi case: last 3p, left player has 2p and 4p
+        g2 = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        g2._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Choose 9 souzu tiles that cannot be partitioned into three melds to avoid accidental Ron
+        non_partitionable_souzu = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
+        ]
+        g2._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + non_partitionable_souzu
+        g2.tiles = []
+        g2.current_player_idx = 0
+        g2.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
+        node2 = MCTSNode(g2, player_id=1)
+        child2 = node2.expand()
+        # If ron possible it would have triggered; ensure chi selected
+        self.assertIsInstance(child2.action, Chi)
+    
+    def test_discard_heuristic_outermost_on_tie(self):
+        # Actor 0 in action phase: hand 1p,2p,5p,7p,7p plus filler to 11
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        special = [Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.SEVEN)]
+        filler = [Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)]
+        g._player_hands[0] = special + filler
+        g.current_player_idx = 0
+        g.tiles = []
+        node = MCTSNode(g, player_id=0)
+        # Ask heuristic directly
+        legal = g.legal_moves(0)
+        hp = SimpleHeuristicsPlayer(0)
+        choice = hp.select_action(g, 0, legal)
+        self.assertIsInstance(choice, Discard)
+        # Expect 1p discarded over 2p due to outermost tiebreak
+        self.assertEqual(str(choice.tile), '1p')
+    
+    # Exception handling tests retained/adapted below
+
+    def test_mctsnode_expand_no_legal_moves_raises(self):
+        # Create a game with default current_player_idx = 0 and actor set to 1 (no legal moves for actor 1)
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        game.tiles = [Tile(Suit.PINZU, TileType.ONE)]  # ensure simulate loops if needed
+        game.current_player_idx = 0
+        node = MCTSNode(game, player_id=1)
+        with self.assertRaises(MCTSNode.NoLegalMoves):
+            node.expand()
+
+    def test_mctsnode_expand_no_action_from_player_raises(self):
+        # Player that never returns an action
+        class NullChoicePlayer(SimpleHeuristicsPlayer):
+            def select_action(self, game, actor_id, legal_moves):
+                return None
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        game.tiles = [Tile(Suit.PINZU, TileType.ONE)]
+        game.current_player_idx = 0
+        # Ensure actor is current so legal moves exist
+        node = MCTSNode(game, player_id=0, player=NullChoicePlayer(0))
+        with self.assertRaises(MCTSNode.NoActionFromPlayer):
+            node.expand()
+
+    def test_mctsnode_simulate_no_legal_moves_raises(self):
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Ensure there are tiles so simulate enters loop, but pick actor with no legal moves
+        game.tiles = [Tile(Suit.PINZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO)]
+        game.current_player_idx = 0
+        node = MCTSNode(game, player_id=1)
+        with self.assertRaises(MCTSNode.NoLegalMoves):
+            node.simulate()
+
+    def test_mctsnode_simulate_no_action_from_player_raises(self):
+        class NullChoicePlayer(SimpleHeuristicsPlayer):
+            def select_action(self, game, actor_id, legal_moves):
+                return None
+        players = [Player(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        game.tiles = [Tile(Suit.PINZU, TileType.ONE)]
+        game.current_player_idx = 0
+        node = MCTSNode(game, player_id=0, player=NullChoicePlayer(0))
+        with self.assertRaises(MCTSNode.NoActionFromPlayer):
+            node.simulate()
 
 
 if __name__ == '__main__':

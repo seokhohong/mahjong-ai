@@ -100,13 +100,13 @@ Processing:
 #### Usage Example
 
 ```python
-from core.game import PQNetwork, GameState
+from core.game import PQNetwork, GamePerspective
 
 # Create a PQNetwork with convolutional architecture
 pq_network = PQNetwork(hidden_size=128, embedding_dim=4, max_turns=50)
 
 # Evaluate a game state
-game_state = GameState(...)
+game_state = GamePerspective(...)
 policy, value = pq_network.evaluate(game_state)
 
 # Get action probabilities

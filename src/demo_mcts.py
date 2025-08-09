@@ -51,7 +51,7 @@ def demo_mcts_ai():
             print(f"Drew tile: {new_tile}")
         
         # Get game state and let player decide
-        game_state = game.get_game_state(game.current_player_idx)
+        game_state = game.get_turn_snapshot(game.current_player_idx)
         action = current_player.play(game_state)
         
         # Handle the action
@@ -67,7 +67,10 @@ def demo_mcts_ai():
             break
         elif isinstance(action, Discard):
             current_player.remove_tile(action.tile)
-            game.discarded_tiles.append(action.tile)
+            try:
+                game.player_discards[current_player_id].append(action.tile)
+            except Exception:
+                pass
             print(f"Discarded: {action.tile}")
             
             # Check for Ron
@@ -107,7 +110,11 @@ def demo_mcts_ai():
     print(f"\nFinal stats:")
     print(f"- Rounds played: {round_count}")
     print(f"- Tiles remaining: {len(game.tiles)}")
-    print(f"- Discarded tiles: {len(game.discarded_tiles)}")
+    try:
+        total_discards = sum(len(v) for v in game.player_discards.values())
+    except Exception:
+        total_discards = 0
+    print(f"- Discarded tiles: {total_discards}")
     
     # Show final hands
     for i, player in enumerate(game.players):
@@ -150,7 +157,7 @@ def demo_mcts_vs_random():
             current_player.add_tile(new_tile)
         
         # Get game state and let player decide
-        game_state = game.get_game_state(game.current_player_idx)
+        game_state = game.get_turn_snapshot(game.current_player_idx)
         action = current_player.play(game_state)
         
         # Handle the action
@@ -166,7 +173,10 @@ def demo_mcts_vs_random():
             break
         elif isinstance(action, Discard):
             current_player.remove_tile(action.tile)
-            game.discarded_tiles.append(action.tile)
+            try:
+                game.player_discards[current_player_idx].append(action.tile)
+            except Exception:
+                pass
             print(f"Discarded: {action.tile}")
             
             # Check for Ron

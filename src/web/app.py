@@ -86,8 +86,7 @@ class GameManager:
         self.game = None
         self.players = None
         self.game_id = None
-        self.newly_drawn_tile = None  # Track the newly drawn tile
-        self.player_discards = [[], [], [], []]  # Track discards by player
+        self.newly_drawn_tile = None  # Deprecated: use game.last_drawn_tile
         self.win_type = None # Track win type (Ron or Tsumo)
         self.game_mode = None  # 'play' or 'watch'
     
@@ -117,7 +116,6 @@ class GameManager:
         self.game = SimpleJong(self.players)
         self.game_id = random.randint(1000, 9999)
         self.newly_drawn_tile = None
-        self.player_discards = [[], [], [], []]
         self.win_type = None
         return self.game_id
     
@@ -162,8 +160,16 @@ class GameManager:
         if self.game_mode == 'play':
             human_hand = [str(tile) for tile in self._sort_hand(self.players[0].hand)]
         
-        # Get discarded tiles by player
-        discarded_tiles = [str(tile) for tile in self.game.discarded_tiles]
+        # Get discarded tiles computed from per-player discards
+        discarded_tiles = []
+        # Per-player discards from engine
+        try:
+            player_discards = [[str(t) for t in self.game.player_discards[i]] for i in range(4)]
+            for i in range(4):
+                discarded_tiles.extend(player_discards[i])
+        except Exception:
+            player_discards = [[], [], [], []]
+            discarded_tiles = []
         
         # Get other players' hand sizes or winning hand
         other_hands = []
@@ -201,7 +207,7 @@ class GameManager:
         # Get possible actions for the human player (only in play mode)
         possible_actions = {'pon': [], 'chi': [], 'ron': [], 'tsumo': []}
         if not self.game.is_game_over() and self.game_mode == 'play':
-            game_state_for_human = self.game.get_game_state(0)
+            game_state_for_human = self.game.get_turn_snapshot(0)
             possible_actions = self.players[0].get_possible_actions(game_state_for_human)
             
             # Only show tsumo on human's turn, not on other players' discards
@@ -214,14 +220,14 @@ class GameManager:
             'current_player': self.game.current_player_idx,
             'human_hand': human_hand,
             'discarded_tiles': discarded_tiles,
-            'player_discards': [discards for discards in self.player_discards],
+            'player_discards': player_discards,
             'other_hands': other_hands,
             'remaining_tiles': self.game.get_remaining_tiles(),
             'game_over': self.game.is_game_over(),
             'winner': self.game.get_winner(),
             'win_type': self.win_type,
             'is_human_turn': self.game_mode == 'play' and self.game.current_player_idx == 0,
-            'newly_drawn_tile': self.newly_drawn_tile,
+            'newly_drawn_tile': str(self.game.last_drawn_tile) if getattr(self.game, 'last_drawn_tile', None) else None,
             'called_sets': called_sets,
             'possible_actions': possible_actions,
             'last_discarded_tile': str(self.game.last_discarded_tile) if self.game.last_discarded_tile else None
@@ -239,7 +245,12 @@ class GameManager:
         # Draw a tile
         new_tile = self.game.tiles.pop()
         self.players[0].add_tile(new_tile)
-        self.newly_drawn_tile = str(new_tile)  # Track the newly drawn tile
+        # Track newly drawn tile in engine
+        try:
+            self.game.last_drawn_tile = new_tile
+            self.game.last_drawn_player = 0
+        except Exception:
+            pass
         return True, f"Drew tile {new_tile}"
 
     def human_discard(self, tile_str):
@@ -262,15 +273,22 @@ class GameManager:
         if tile not in self.players[0].hand:
             return False, "Tile not in hand"
         
-        # Remove the tile from hand and add to discarded tiles
+        # Remove the tile from hand and add to per-player discarded tiles
         self.players[0].remove_tile(tile)
-        self.game.discarded_tiles.append(tile)
-        self.player_discards[0].append(str(tile)) # Track the discard
+        # Track discard in engine per-player discards
+        try:
+            self.game.player_discards[0].append(tile)
+        except Exception:
+            pass
         self.game.last_discarded_tile = tile
         self.game.last_discard_player = 0
         
         # Clear the newly drawn tile since we're discarding
-        self.newly_drawn_tile = None
+        try:
+            self.game.last_drawn_tile = None
+            self.game.last_drawn_player = None
+        except Exception:
+            pass
         
         # Check if another player can win with the discarded tile (Ron)
         for i, player in enumerate(self.players):
@@ -317,7 +335,7 @@ class GameManager:
                     continue  # Skip the player who discarded
                 
                 ai_player = self.players[ai_player_idx]
-                game_state_for_ai = self.game.get_game_state(ai_player_idx)
+                game_state_for_ai = self.game.get_turn_snapshot(ai_player_idx)
                 possible_actions = ai_player.get_possible_actions(game_state_for_ai)
 
                 # AI decision logic: Ron > Pon > Chi (30% chance to call)
@@ -377,8 +395,10 @@ class GameManager:
         # AI discards a random tile
         discarded_tile = random.choice(current_player.hand)
         current_player.remove_tile(discarded_tile)
-        self.game.discarded_tiles.append(discarded_tile)
-        self.player_discards[current_player_idx].append(str(discarded_tile))
+        try:
+            self.game.player_discards[current_player_idx].append(discarded_tile)
+        except Exception:
+            pass
         self.game.last_discarded_tile = discarded_tile
         self.game.last_discard_player = current_player_idx
 
