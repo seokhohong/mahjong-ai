@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from core.game import (
     SimpleJong, Player, Tile, TileType, Suit,
-    Discard, Tsumo, Ron, Pon, Chi
+    Discard, Tsumo, Ron, Pon, Chi, CalledSet
 )
 
 
@@ -150,6 +150,30 @@ class TestStepLegality(unittest.TestCase):
         self.assertEqual(len(remaining_fives), 0)
         self.assertIsNone(game.last_discarded_tile)
         self.assertEqual(game.current_player_idx, 2)
+
+    def test_illegal_fourth_chi_when_ron_available(self):
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        # Give player 1 three called sets (111p, 222p, 333s)
+        cs1 = CalledSet(tiles=[Tile(Suit.PINZU, TileType.ONE)]*3, call_type='pon', called_tile=Tile(Suit.PINZU, TileType.ONE), caller_position=1, source_position=0)
+        cs2 = CalledSet(tiles=[Tile(Suit.PINZU, TileType.TWO)]*3, call_type='pon', called_tile=Tile(Suit.PINZU, TileType.TWO), caller_position=1, source_position=0)
+        cs3 = CalledSet(tiles=[Tile(Suit.SOUZU, TileType.THREE)]*3, call_type='pon', called_tile=Tile(Suit.SOUZU, TileType.THREE), caller_position=1, source_position=0)
+        g._player_called_sets[1] = [cs1, cs2, cs3]
+        # Player 1 concealed hand has two tiles that could Chi with 3p (2p and 4p)
+        g._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        # Player 0 discards 3p; player 1 is left of discarder
+        g._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)]*10
+        g.tiles = []
+        g.current_player_idx = 0
+        self.assertTrue(g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
+        # Legal moves for player 1 should include Ron and exclude Chi
+        moves_p1 = g.legal_moves(1)
+        self.assertTrue(any(isinstance(m, Ron) for m in moves_p1))
+        self.assertFalse(any(isinstance(m, Chi) for m in moves_p1))
+        # Explicit Chi attempt should be illegal
+        chi_attempt = Chi([Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)])
+        self.assertFalse(g.is_legal(1, chi_attempt))
+        with self.assertRaises(SimpleJong.IllegalMoveException):
+            g.step(1, chi_attempt)
 
     def test_legal_moves_action_phase_for_current_player(self):
         # At start, current player is 0 with 11 tiles; tsumo should be absent, discards present

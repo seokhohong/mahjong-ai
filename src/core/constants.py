@@ -20,7 +20,12 @@ MAX_CALLED_SETS_ALL_OPPONENTS: int = (NUM_PLAYERS - 1) * MAX_CALLED_SETS_PER_PLA
 
 # Encodings
 EMBEDDING_DIM: int = 4
-MAX_TURNS: int = 50
+# Maximum turns per player round (upper bound):
+# After initial dealing (11 tiles per player in SimpleJong), remaining draws are TOTAL_TILES - 11*NUM_PLAYERS.
+# Each draw is followed by a discard, and up to 4 players can have reaction opportunities.
+# We cap the per-player discard/turn sequence vector length as 4 * remaining_draws for headroom.
+REMAINING_AFTER_DEAL: int = max(0, TOTAL_TILES - (11 * NUM_PLAYERS))
+MAX_TURNS: int = 4 * REMAINING_AFTER_DEAL
 GAME_STATE_VEC_LEN: int = 50
 
 

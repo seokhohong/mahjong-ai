@@ -39,13 +39,6 @@ def _import_class(class_path: str) -> Type:
     raise ValueError(f'Unknown player class: {class_path}')
 
 
-def _warmup_predict(net: PurePolicyNetwork) -> None:
-    import numpy as np
-    hands = np.zeros((1, 12), dtype=np.int32)
-    discs = np.zeros((1, 4, net.max_turns), dtype=np.int32)
-    gss = np.zeros((1, 50), dtype=np.float32)
-    _ = net.model.predict([hands, discs, gss], verbose=0)
-
 
 def build_players(classes_csv: str, models_csv: Optional[str]) -> List[Player]:
     """Build four players from a comma-separated class list and optional per-seat models.
@@ -75,7 +68,6 @@ def build_players(classes_csv: str, models_csv: Optional[str]) -> List[Player]:
             if mp not in path_to_net:
                 net = PurePolicyNetwork()
                 net.load_model(mp)
-                _warmup_predict(net)
                 path_to_net[mp] = net
             players.append(cls(i, path_to_net[mp]))
         elif issubclass(cls, Player):

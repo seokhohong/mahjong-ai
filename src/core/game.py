@@ -6,15 +6,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 import copy
 
-# Import TensorFlow/Keras
+from src.core.constants import MAX_CALLED_SETS_PER_PLAYER
+
+# Import PyTorch; keep legacy flag name for compatibility with tests
 try:
-    import tensorflow as tf
-    from tensorflow import keras
-    from tensorflow.keras import layers
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    print("Warning: TensorFlow not available. PQNetwork will not work without TensorFlow.")
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch import optim
+    TORCH_AVAILABLE = True
+except Exception:
+    TORCH_AVAILABLE = False
+
+# Backward-compat alias used by tests (interpreted as "deep learning available")
+TENSORFLOW_AVAILABLE = TORCH_AVAILABLE
 
 
 class Suit(Enum):
@@ -597,6 +602,9 @@ class SimpleJong:
         if actor_id == self.last_discard_player:
             return False
         rs = self.get_game_perspective(actor_id)
+        # If Ron is available, it is the only legal reaction in this simplified ruleset
+        if rs.can_ron():
+            return isinstance(move, Ron)
         if isinstance(move, Ron):
             return rs.can_ron()
         if isinstance(move, Pon):
@@ -778,6 +786,8 @@ class SimpleJong:
                 source_position=self.last_discard_player if self.last_discard_player is not None else -1,
             )
             self._player_called_sets[actor_id].append(called)
+            # we should never have 4 called sets
+            assert len(self._player_called_sets[actor_id]) <= MAX_CALLED_SETS_PER_PLAYER
             # Transfer turn
             self.last_discarded_tile = None
             self.last_discard_player = None
@@ -1075,137 +1085,42 @@ class MCTSNode:
 
 
 class PQNetwork:
-    """Neural network that outputs both policy and value for Mahjong game states using TensorFlow/Keras"""
-    
+    """Policy-value network implemented in PyTorch (keeps legacy API where feasible)."""
+
+    class _TorchPQ(nn.Module):
+        def __init__(self, input_dim: int, hidden_size: int):
+            super().__init__()
+            self.fc1 = nn.Linear(input_dim, hidden_size)
+            self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
+            self.fc3 = nn.Linear(hidden_size // 2, hidden_size // 2)
+            # Heads
+            self.head_action = nn.Linear(hidden_size // 2, 5)
+            self.head_tile1 = nn.Linear(hidden_size // 2, 18)
+            self.head_tile2 = nn.Linear(hidden_size // 2, 18)
+            self.head_value = nn.Linear(hidden_size // 2, 1)
+
+        def forward(self, x: torch.Tensor):
+            x = F.relu(self.fc1(x))
+            x = F.dropout(x, p=0.3, training=self.training)
+            x = F.relu(self.fc2(x))
+            x = F.dropout(x, p=0.3, training=self.training)
+            x = F.relu(self.fc3(x))
+            pa = F.softmax(self.head_action(x), dim=-1)
+            pt1 = F.softmax(self.head_tile1(x), dim=-1)
+            pt2 = F.softmax(self.head_tile2(x), dim=-1)
+            val = torch.tanh(self.head_value(x))
+            return pa, pt1, pt2, val
+
     def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = 50):
-        if not TENSORFLOW_AVAILABLE:
-            raise ImportError("TensorFlow is required for PQNetwork. Please install tensorflow.")
-        
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch is required for PQNetwork. Please install torch.")
         self.hidden_size = hidden_size
         self.embedding_dim = embedding_dim
         self.max_turns = max_turns
-        
-        # Build the model
-        self.model = self._build_model()
-    
-    def _build_model(self):
-        """
-        Build the TensorFlow/Keras model with convolutional architecture
-
-        Policy heads design (tight policy space):
-        - policy_action (5): Categorical over action categories in this exact order:
-          [Discard, Ron, Tsumo, Pon, Chi]
-        - policy_tile1 (18): Categorical over tile types (1-9 for Pinzu and Souzu)
-          used to specify the tile for actions that operate on a single tile
-          (e.g., Discard Xp/Xs, Pon on tile type). For Ron/Tsumo, this head is ignored.
-        - policy_tile2 (18): Categorical over tile types used only for Chi, representing
-          the second tile from hand in the sequence call. Ignored for non-Chi actions.
-
-        Inference-time action scoring examples:
-        - Discard 3p: P(Discard) * P(tile1=3p)
-        - Ron: P(Ron)
-        - Tsumo: P(Tsumo)
-        - Pon on 5s: P(Pon) * P(tile1=5s)
-        - Chi using [2s,4s] with last discard 3s: P(Chi) * P(tile1=2s) * P(tile2=4s)
-        """
-        
-        # Input layers
-        # Hand inputs: (batch_size, 12, 5) - 12 tiles, 5 features (4 embedding + 1 called flag)
-        hand_inputs = keras.Input(shape=(12, 5), name='hand_inputs')
-        
-        # Discard pile inputs: (batch_size, max_turns, embedding_dim) for each player
-        discard_inputs = []
-        for i in range(4):
-            discard_input = keras.Input(shape=(self.max_turns, self.embedding_dim), name=f'discard_input_{i}')
-            discard_inputs.append(discard_input)
-        
-        # Additional game state features
-        game_state_input = keras.Input(shape=(50,), name='game_state_input')
-        
-        # 1. Process hands with shared convolutional layers
-        hand_conv1 = layers.Conv1D(64, kernel_size=3, padding='same', activation='relu')(hand_inputs)
-        hand_conv1 = layers.BatchNormalization()(hand_conv1)
-        hand_conv2 = layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(hand_conv1)
-        hand_conv2 = layers.BatchNormalization()(hand_conv2)
-        hand_pool = layers.GlobalMaxPooling1D()(hand_conv2)
-        
-        # 2. Process discard piles with shared convolutional layers
-        discard_features = []
-        for i, discard_input in enumerate(discard_inputs):
-            # Apply the same conv layers to each player's discard pile
-            discard_conv1 = layers.Conv1D(32, kernel_size=3, padding='same', activation='relu')(discard_input)
-            discard_conv1 = layers.BatchNormalization()(discard_conv1)
-            discard_conv2 = layers.Conv1D(64, kernel_size=3, padding='same', activation='relu')(discard_conv1)
-            discard_conv2 = layers.BatchNormalization()(discard_conv2)
-            discard_pool = layers.GlobalMaxPooling1D()(discard_conv2)
-            discard_features.append(discard_pool)
-        
-        # 3. Combine hand and discard features for each player
-        player_features = []
-        for i in range(4):
-            if i == 0:  # Current player - use actual hand features
-                player_hand = hand_pool
-            else:  # Opponents - use placeholder (will be masked)
-                player_hand = layers.Dense(128, activation='relu')(layers.Dense(128, activation='relu')(game_state_input))
-            
-            player_discard = discard_features[i]
-            
-            # Combine hand and discard features
-            combined = layers.Concatenate()([player_hand, player_discard])
-            player_combined = layers.Dense(256, activation='relu')(combined)
-            player_combined = layers.Dropout(0.3)(player_combined)
-            player_features.append(player_combined)
-        
-        # 4. Concatenate all player features
-        all_players = layers.Concatenate()(player_features)
-        
-        # 5. Final hidden layers
-        x = layers.Dense(self.hidden_size, activation='relu')(all_players)
-        x = layers.Dropout(0.3)(x)
-        x = layers.Dense(self.hidden_size // 2, activation='relu')(x)
-        x = layers.Dropout(0.3)(x)
-        
-        # 6. Add game state features
-        x = layers.Concatenate()([x, game_state_input])
-        x = layers.Dense(self.hidden_size // 2, activation='relu')(x)
-        x = layers.Dropout(0.3)(x)
-        
-        # 7. Output heads
-        # Tight policy space with explicit heads
-        policy_action_head = layers.Dense(5, activation='softmax', name='policy_action')
-        policy_tile1_head = layers.Dense(18, activation='softmax', name='policy_tile1')
-        policy_tile2_head = layers.Dense(18, activation='softmax', name='policy_tile2')
-
-        policy_action = policy_action_head(x)
-        policy_tile1 = policy_tile1_head(x)
-        policy_tile2 = policy_tile2_head(x)
-        value_head = layers.Dense(1, activation='tanh', name='value')(x)
-        
-        # Create model
-        inputs = [hand_inputs] + discard_inputs + [game_state_input]
-        model = keras.Model(
-            inputs=inputs,
-            outputs=[policy_action, policy_tile1, policy_tile2, value_head]
-        )
-        
-        # Compile model
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.001),
-            loss={
-                'policy_action': 'categorical_crossentropy',
-                'policy_tile1': 'categorical_crossentropy',
-                'policy_tile2': 'categorical_crossentropy',
-                'value': 'mse'
-            },
-            metrics={
-                'policy_action': 'accuracy',
-                'policy_tile1': 'accuracy',
-                'policy_tile2': 'accuracy',
-                'value': 'mae'
-            }
-        )
-        
-        return model
+        # Compute flattened feature size used by our simple MLP
+        self._flat_dim = (12 * 5) + (4 * self.max_turns * self.embedding_dim) + 50
+        self.model = PQNetwork._TorchPQ(self._flat_dim, hidden_size)
+        self.model.eval()
     
     def evaluate(self, game_state: 'GamePerspective') -> Tuple[Dict[str, np.ndarray], float]:
         """
@@ -1219,18 +1134,21 @@ class PQNetwork:
         # Extract features
         features = self._extract_features(game_state)
         
-        # Batch the features for prediction
-        batched_features = []
-        for feature in features:
-            if len(feature.shape) == 2:
-                # Add batch dimension
-                batched_features.append(np.expand_dims(feature, axis=0))
-            else:
-                # Already 1D, add batch dimension
-                batched_features.append(np.expand_dims(feature, axis=0))
-        
-        # Get predictions
-        pred_action, pred_tile1, pred_tile2, value = self.model.predict(batched_features, verbose=0)
+        # Flatten inputs into a single vector
+        flat_parts: List[np.ndarray] = []
+        # hand (12,5)
+        flat_parts.append(features[0].reshape(-1))
+        # 4 discard tensors
+        for i in range(1, 5):
+            flat_parts.append(features[i].reshape(-1))
+        # game state (50,)
+        flat_parts.append(features[5].reshape(-1))
+        x = np.concatenate(flat_parts, axis=0)[None, :].astype(np.float32)
+        with torch.no_grad():
+            pa, pt1, pt2, val = self.model(torch.from_numpy(x))
+        pred_action, pred_tile1, pred_tile2, value = (
+            pa.numpy(), pt1.numpy(), pt2.numpy(), val.numpy()
+        )
         policy = {
             'action': pred_action[0],
             'tile1': pred_tile1[0],
@@ -1429,16 +1347,17 @@ class PQNetwork:
         return action_probs
     
     def save_model(self, filepath: str):
-        """Save the model to a file"""
-        if not filepath.endswith('.keras'):
-            filepath += '.keras'
-        self.model.save(filepath)
+        """Save the model weights (PyTorch)."""
+        if not filepath.endswith('.pt'):
+            filepath += '.pt'
+        torch.save(self.model.state_dict(), filepath)
     
     def load_model(self, filepath: str):
-        """Load the model from a file"""
-        if not filepath.endswith('.keras'):
-            filepath += '.keras'
-        self.model = keras.models.load_model(filepath)
+        """Load the model weights (PyTorch)."""
+        if not filepath.endswith('.pt'):
+            filepath += '.pt'
+        state = torch.load(filepath, map_location='cpu')
+        self.model.load_state_dict(state)
     
     def train(self, training_data: List[Tuple['GamePerspective', Any, float]], epochs: int = 10, batch_size: int = 32):
         """

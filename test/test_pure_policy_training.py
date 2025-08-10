@@ -31,10 +31,7 @@ class TestPurePolicyTraining(unittest.TestCase):
         self.assertGreater(y_flat.shape[1], 60)
 
         # Train a tiny network quickly
-        try:
-            net = PurePolicyNetwork(hidden_size=8, embedding_dim=4, max_turns=50)
-        except ImportError:
-            self.skipTest('TensorFlow not available')
+        net = PurePolicyNetwork(hidden_size=8, embedding_dim=4, max_turns=50)
 
         # Fit a single epoch; tiny data, should run in seconds
         # Build model inputs from indexed states
@@ -53,12 +50,15 @@ class TestPurePolicyTraining(unittest.TestCase):
         called = np.asarray(called, dtype=np.int32)
         gss = np.asarray(gss, dtype=np.float32)
 
+        # Provide explicit sample weights (normally rewards). Use zeros for this tiny test.
+        sample_w = np.zeros((states.shape[0],), dtype=np.float32)
         net.model.fit(
             [hands, discs, called, gss],
             {'policy_flat': y_flat},
             epochs=1,
             batch_size=max(1, min(8, states.shape[0])),
             verbose=0,
+            sample_weight={'policy_flat': sample_w},
         )
 
         # Quick forward pass
@@ -66,6 +66,55 @@ class TestPurePolicyTraining(unittest.TestCase):
         # Single softmax over flattened actions; outs is (N, num_actions)
         self.assertEqual(outs.ndim, 2)
         self.assertEqual(outs.shape[1], y_flat.shape[1])
+
+    def test_gpu_training_if_available(self):
+        try:
+            import torch  # type: ignore
+        except Exception:
+            self.skipTest('PyTorch not available')
+        if not torch.cuda.is_available():
+            self.skipTest('CUDA not available on this machine')
+
+        # Generate a very small dataset
+        out_dir = os.path.join(os.path.dirname(__file__), '..', 'training_data')
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, 'pure_policy_test_gpu_1game.npz')
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        path = generate_pure_policy_dataset(num_games=1, seed=123, out_path=out_path)
+        data = np.load(path, allow_pickle=True)
+
+        states = data['states']
+        y_flat = data['y_flat']
+
+        # Build inputs
+        hands = []
+        discs = []
+        called = []
+        gss = []
+        for s in states:
+            s = s.item() if hasattr(s, 'item') else s
+            hands.append(s['hand_idx'])
+            discs.append(s['disc_idx'])
+            called.append(s.get('called_sets_idx', np.zeros((4,4,3), dtype=np.int32)))
+            gss.append(s['game_state'])
+        hands = np.asarray(hands, dtype=np.int32)
+        discs = np.asarray(discs, dtype=np.int32)
+        called = np.asarray(called, dtype=np.int32)
+        gss = np.asarray(gss, dtype=np.float32)
+
+        net = PurePolicyNetwork(hidden_size=8, embedding_dim=4, max_turns=50)
+        # Ensure model selects CUDA device
+        self.assertTrue(getattr(net, '_device', None) is not None)
+        self.assertEqual(getattr(net, '_device').type, 'cuda')
+
+        torch.cuda.reset_peak_memory_stats()
+        mem_before = torch.cuda.memory_allocated()
+        # One brief epoch to allocate and run on GPU
+        net.model.fit([hands, discs, called, gss], {'policy_flat': y_flat}, epochs=1, batch_size=max(1, min(8, states.shape[0])), verbose=0, shuffle=False)
+        mem_after = torch.cuda.memory_allocated()
+        peak = torch.cuda.max_memory_allocated()
+        self.assertTrue((mem_after > mem_before) or (peak > mem_before), 'Expected GPU memory usage to increase during training')
 
 
 if __name__ == '__main__':

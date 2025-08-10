@@ -1,8 +1,7 @@
-from .pure_policy import PurePolicyNetwork, PurePolicyRecorder
+from .pure_policy import PurePolicyNetwork
 
 __all__ = [
     'PurePolicyNetwork',
-    'PurePolicyRecorder',
 ]
 
 

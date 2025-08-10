@@ -43,14 +43,15 @@ class PurePolicyPlayer(Player):
         self._action_index = get_action_index_map()
 
     # --- Model input encoding (indices) ---
-    def _encode_inputs(self, gs: GamePerspective) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _encode_inputs(self, gs: GamePerspective) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         # Reuse dataset encoders via serialization path
         sd = serialize_state(gs)
         idx = extract_indexed_state(sd)
         hand_idx = idx['hand_idx']
         disc_idx = idx['disc_idx']
+        called_idx = idx.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32))
         game_state = idx['game_state']
-        return hand_idx, disc_idx, game_state
+        return hand_idx, disc_idx, called_idx, game_state
 
     # --- Mapping legal moves to flattened indices ---
     def _legal_action_indices_action_phase(self, gs: GamePerspective, legal_moves: List[Any]) -> List[Tuple[int, Any]]:
@@ -84,8 +85,13 @@ class PurePolicyPlayer(Player):
     def _select_best_legal(self, gs: GamePerspective, legal_moves: List[Any]) -> Optional[Any]:
         if not legal_moves:
             return None
-        hand_idx, disc_idx, game_state = self._encode_inputs(gs)
-        probs = self.network.model.predict([hand_idx[None, :], disc_idx[None, :, :], game_state[None, :]], verbose=0)[0]
+        hand_idx, disc_idx, called_idx, game_state = self._encode_inputs(gs)
+        probs = self.network.model.predict([
+            hand_idx[None, :],
+            disc_idx[None, :, :],
+            called_idx[None, :, :, :],
+            game_state[None, :]
+        ], verbose=0)[0]
 
         # Determine phase: if last_discard exists and not from self -> reaction phase
         if gs.last_discarded_tile is not None and gs.last_discard_player is not None and gs.last_discard_player != gs.player_id:
