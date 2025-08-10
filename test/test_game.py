@@ -419,8 +419,13 @@ class TestSimpleJong(unittest.TestCase):
         game = SimpleJong(players)
         # Configure hands explicitly
         game._player_hands[3] = [target] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
-        # Player 0 (left of discarder) can chi with 2p and 4p
-        game._player_hands[0] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        # Player 0 (left of discarder) can chi with 2p and 4p, but cannot ron (use non-partitionable filler)
+        non_partitionable_souzu = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
+        ]
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + non_partitionable_souzu
         # Player 1 can pon with two 3p but will decline
         game._player_hands[1] = [Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
         game._player_hands[2] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
@@ -481,6 +486,19 @@ class TestSimpleJong(unittest.TestCase):
         self.assertTrue(game.is_game_over())
         self.assertIsNone(winner)
         self.assertEqual(game.get_winners(), [])
+
+    def test_at_least_one_loser_over_20_games(self):
+        """Run 20 games with a fixed seed and require that at least one game has a loser (Ron)."""
+        seed = 314159
+        random.seed(seed)
+        losers = 0
+        for _ in range(20):
+            players = [Player(0), Player(1), Player(2), Player(3)]
+            game = SimpleJong(players)
+            game.play_round()
+            if game.get_loser() is not None:
+                losers += 1
+        self.assertGreaterEqual(losers, 1, f"Expected at least one Ron loser across 20 games (seed={seed})")
 
 if __name__ == "__main__":
     # Run the tests

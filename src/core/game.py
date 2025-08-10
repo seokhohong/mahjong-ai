@@ -256,8 +256,6 @@ class Player:
         self.player_id = player_id
         # Back-reference to owning game; set by SimpleJong when players are attached
         self._game: Optional['SimpleJong'] = None
-        # Optional recorder set by higher-level orchestrators (e.g., data generator)
-        self._recorder = None
     
     def play(self, game_state: GamePerspective) -> Action:
         """
@@ -335,20 +333,6 @@ class Player:
         )
         return ranked[0]
 
-    # --- Recording hooks (no-op by default) ---
-    def set_recorder(self, recorder: Any) -> None:
-        """Attach a recorder that will be notified at decision points."""
-        self._recorder = recorder
-
-    def notify_turn_opportunity(self, game_state: GamePerspective) -> None:
-        """Called by the game at the start of this player's turn before acting."""
-        if self._recorder is not None:
-            self._recorder.record(game_state, self, kind='turn')
-
-    def notify_reaction_opportunity(self, game_state: GamePerspective) -> None:
-        """Called by the game when this player can react to a discard."""
-        if self._recorder is not None:
-            self._recorder.record(game_state, self, kind='reaction')
 
     def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]) -> Reaction:
         """Choose a reaction given all legal options simultaneously.
@@ -363,6 +347,7 @@ class Player:
             return Pon(options['pon'][0])
         if options.get('chi'):
             return Chi(options['chi'][0])
+        # Must return a Reaction; default to Pass
         return PassCall()
 
 class SimpleJong:
@@ -381,7 +366,6 @@ class SimpleJong:
         self.player_discards: Dict[int, List[Tile]] = {i: [] for i in range(SimpleJong.NUM_PLAYERS)}
         self.current_player_idx = 0
         self.game_over = False
-        self.winner = None
         self.winners: List[int] = []
         # The single losing player on a Ron (the discarder). None for Tsumo or draws.
         self.loser: Optional[int] = None
@@ -517,7 +501,7 @@ class SimpleJong:
         """
         while not self.game_over and (self.tiles or self.last_discarded_tile is not None):
             if self._resolve_outstanding_reactions_if_any():
-                return self.winner
+                return (self.winners[0] if self.winners else None)
 
             # Start of turn: draw tile if needed
             self._draw_for_current_if_needed()
@@ -602,11 +586,15 @@ class SimpleJong:
         if actor_id == self.last_discard_player:
             return False
         rs = self.get_game_perspective(actor_id)
-        # If Ron is available, it is the only legal reaction in this simplified ruleset
-        if rs.can_ron():
-            return isinstance(move, Ron)
+        # Allow Ron when available
         if isinstance(move, Ron):
             return rs.can_ron()
+        # Pass is only legal if some other reaction (Ron/Pon/Chi) is legal
+        if isinstance(move, PassCall):
+            if rs.can_ron():
+                return True
+            opts = self.get_call_options(rs)
+            return bool(opts.get('pon')) or bool(opts.get('chi'))
         if isinstance(move, Pon):
             opts = self.get_call_options(rs)
             legal_sets = opts.get('pon', [])
@@ -641,16 +629,21 @@ class SimpleJong:
             if actor_id == self.last_discard_player:
                 return []
             rs = self.get_game_perspective(actor_id)
-            # Ron (and disallow Pon/Chi if Ron is available per simplified rules)
+            # Build reactions: Ron first, else Pon/Chi
+            has_any = False
             if rs.can_ron():
                 moves.append(Ron())
-                return moves
-            # Pon/Chi options (only when Ron is not available)
-            opts = self.get_call_options(rs)
-            for tiles in opts.get('pon', []):
-                moves.append(Pon(tiles))
-            for tiles in opts.get('chi', []):
-                moves.append(Chi(tiles))
+                has_any = True
+            else:
+                opts = self.get_call_options(rs)
+                for tiles in opts.get('pon', []):
+                    moves.append(Pon(tiles))
+                for tiles in opts.get('chi', []):
+                    moves.append(Chi(tiles))
+                has_any = bool(moves)
+            # Pass is legal only if there exists at least one other legal reaction
+            if has_any:
+                moves.insert(0, PassCall())
             return moves
 
         # Otherwise, action phase: only current player may act
@@ -665,6 +658,24 @@ class SimpleJong:
         for t in list(self._player_hands[actor_id]):
             moves.append(Discard(t))
         return moves
+
+    def legality_mask(self, actor_id: int) -> 'np.ndarray':
+        """Return a boolean mask over the flattened action space used by pure policy.
+
+        The mask is of length equal to get_num_actions() and has True for legal
+        action indices for the given actor in the current state, False otherwise.
+        """
+
+        from src.core.learn.pure_policy_dataset import get_num_actions, serialize_action, encode_action_flat_index  # type: ignore
+        n = int(get_num_actions())
+        mask = np.zeros((n,), dtype=bool)
+        gs = self.get_game_perspective(actor_id)
+        ldt = str(gs.last_discarded_tile) if gs.last_discarded_tile is not None else None
+        for m in self.legal_moves(actor_id):
+            ad = serialize_action(m)
+            idx = encode_action_flat_index(ad, ldt)
+            mask[int(idx)] = True
+        return mask
 
     def _solicit_and_apply_reactions(self) -> bool:
         """Solicit reactions and apply them using the unified step() API.
@@ -691,8 +702,10 @@ class SimpleJong:
                 'chi': call_opts.get('chi', []),
             }
             per_player_options[i] = opts
+            # Only solicit when there is any legal reaction available
             if opts['ron'] or opts['pon'] or opts['chi']:
                 choice = self.players[i].choose_reaction(rs, {'pon': opts.get('pon', []), 'chi': opts.get('chi', [])})
+                assert choice is not None
                 chosen[i] = choice
 
         # 1) Ron(s): any players who chose Ron and can_ron
@@ -703,7 +716,6 @@ class SimpleJong:
         if ronners:
             # Multiple Rons: end immediately; record all winners and the single loser (discarder)
             self.winners = ronners[:]
-            self.winner = ronners[0]
             self.loser = discarder
             self.game_over = True
             return True
@@ -743,7 +755,6 @@ class SimpleJong:
         if isinstance(move, (Tsumo, Discard)):
             gs = self.get_game_perspective(actor_id)
             if isinstance(move, Tsumo):
-                self.winner = actor_id
                 self.winners = [actor_id]
                 self.loser = None
                 self.game_over = True
@@ -764,8 +775,6 @@ class SimpleJong:
         # Ron
         if isinstance(move, Ron):
             # Multiple rons supported externally by calling step() for each winner
-            if not self.winners:
-                self.winner = actor_id
             if actor_id not in self.winners:
                 self.winners.append(actor_id)
             self.loser = self.last_discard_player
@@ -885,8 +894,8 @@ class SimpleJong:
         self._player_hands[player_id] = new_hand
     
     def get_winner(self) -> Optional[int]:
-        """Get the winner's player_id, or None if no winner"""
-        return self.winner
+        """Get the first winner's player_id, or None if no winner"""
+        return (self.winners[0] if self.winners else None)
 
     def get_winners(self) -> List[int]:
         """Get all winners (supports multiple Rons). Empty if no winner."""
@@ -921,7 +930,6 @@ class SimpleJong:
         new_game.player_discards = {i: list(self.player_discards[i]) for i in range(4)}
         new_game.current_player_idx = self.current_player_idx
         new_game.game_over = self.game_over
-        new_game.winner = self.winner
         new_game.winners = list(self.winners)
         new_game.loser = self.loser
         new_game.last_discarded_tile = self.last_discarded_tile
@@ -1062,7 +1070,7 @@ class MCTSNode:
         if not game_state.is_game_over():
             return 0.0  # Draw
         
-        if game_state.winner == player_id:
+        if hasattr(game_state, 'winners') and (player_id in getattr(game_state, 'winners', [])):
             return 1.0  # Win
         else:
             return -1.0  # Loss

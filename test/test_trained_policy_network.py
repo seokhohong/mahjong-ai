@@ -9,11 +9,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from core.game import SimpleJong, Player, Tile, TileType, Suit, Discard
 from core.learn.pure_policy import PurePolicyNetwork
+from core.learn.pure_policy_player import PurePolicyPlayer
 from core.learn.pure_policy_dataset import serialize_state, extract_indexed_state, get_action_index_map
 
 
 class TestTrainedPolicyNetwork(unittest.TestCase):
-    MODEL_PATH = os.path.join('training_data', 'models', 'pure_policy_gen0.pt')
+    MODEL_PATH = os.path.join('training_data', 'models', 'pure_policy_5k.pt')
 
     def setUp(self):
         if not os.path.exists(self.MODEL_PATH):
@@ -73,6 +74,54 @@ class TestTrainedPolicyNetwork(unittest.TestCase):
         pred_idx = int(np.argmax(probs))
         self.assertEqual(pred_idx, amap["ron"])
 
+
+    # this test is failing because the network is not predicting legal moves right now
+    def test_predicts_legal(self):
+        """Ensure that whenever the network is consulted (action or reaction),
+        the argmax of its predicted policy corresponds to a legal move index.
+        """
+        if not os.path.exists(self.MODEL_PATH):
+            self.skipTest(f"Trained model not found at {self.MODEL_PATH}")
+
+        net = PurePolicyNetwork()
+        net.load_model(self.MODEL_PATH)
+
+        # Define an audited player that asserts legality of the network argmax
+        class AuditedPurePolicyPlayer(PurePolicyPlayer):
+            def _assert_argmax_legal(self, gs: 'SimpleJong.GamePerspective') -> None:  # type: ignore[name-defined]
+                import numpy as _np  # local import to avoid polluting module
+                probs = self.predict_policy_probs(gs)
+                mask = self._game.legality_mask(self.player_id)  # type: ignore[attr-defined]
+                idx = int(_np.argmax(probs))
+                assert bool(mask[idx]), f"Masked argmax predicted illegal action index {idx}"
+
+            def play(self, game_state):  # action phase
+                self._assert_argmax_legal(game_state)
+                return super().play(game_state)
+
+            def choose_reaction(self, game_state, options):  # reaction phase
+                self._assert_argmax_legal(game_state)
+                return super().choose_reaction(game_state, options)
+
+        # Seat 0 uses the audited pure policy player; others are baseline
+        g = SimpleJong([
+            AuditedPurePolicyPlayer(0, net),
+            Player(1),
+            Player(2),
+            Player(3),
+        ])
+
+        # Play several rounds to exercise both action and reaction consultations
+        # (A single round already consults many times; a few repeats adds coverage.)
+        for _ in range(3):
+            g.play_round()
+            # Reinitialize a new game instance with fresh randomness for subsequent iterations
+            g = SimpleJong([
+                AuditedPurePolicyPlayer(0, net),
+                Player(1),
+                Player(2),
+                Player(3),
+            ])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

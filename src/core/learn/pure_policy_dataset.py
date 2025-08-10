@@ -10,7 +10,7 @@ import numpy as np
 from scipy import sparse as sp  # efficient batch one-hot
 from tqdm import tqdm  # type: ignore
 
-from ..game import (
+from core.game import (
     SimpleJong,
     Player,
     GamePerspective,
@@ -22,8 +22,9 @@ from ..game import (
     Discard,
     Pon,
     Chi,
+    PassCall,
 )
-from ..constants import (
+from core.constants import (
     TOTAL_TILES,
     MAX_CALLED_SETS_PER_PLAYER,
     MAX_CALLED_SETS_ALL_OPPONENTS,
@@ -32,8 +33,7 @@ from ..constants import (
     GAME_STATE_VEC_LEN,
     MAX_HAND_TILES,
 )
-from ..encoding import tile_str_to_index
-from ..game import SimpleHeuristicsPlayer  # heuristic selector
+from core.encoding import tile_str_to_index
 
 
 def _tile_str(tile: Optional[Tile]) -> Optional[str]:
@@ -92,6 +92,8 @@ def serialize_action(action: Any) -> Dict[str, Any]:
         return {'type': 'pon', 'tiles': [_tile_str(t) for t in action.tiles]}
     if isinstance(action, Chi):
         return {'type': 'chi', 'tiles': [_tile_str(t) for t in action.tiles]}
+    if isinstance(action, PassCall):
+        return {'type': 'pass'}
     # Unknown fallback
     return {'type': 'unknown'}
 
@@ -287,8 +289,14 @@ def _chi_variant(last_tile: str, tiles: List[str]) -> Optional[str]:
     return None
 
 
-def encode_action_flat_index(sd: Dict[str, Any], ad: Dict[str, Any]) -> int:
+def encode_action_flat_index(ad: Dict[str, Any], last_discarded_tile: Optional[str] = None) -> int:
+    """Map a serialized action dict into a flattened action index.
+
+    last_discarded_tile: optional string like '3p' to disambiguate Pon/Chi.
+    """
     atype = ad.get('type')
+    if atype == 'pass':
+        return ACTION_INDEX['pass']
     if atype == 'ron':
         return ACTION_INDEX['ron']
     if atype == 'tsumo':
@@ -300,17 +308,15 @@ def encode_action_flat_index(sd: Dict[str, Any], ad: Dict[str, Any]) -> int:
             return ACTION_INDEX[f'discard_{idx}']
         return ACTION_INDEX['pass']
     if atype == 'pon':
-        last = sd.get('last_discarded_tile')
-        if last:
-            idx = _tile_index_from_str(last)
+        if last_discarded_tile:
+            idx = _tile_index_from_str(last_discarded_tile)
             return ACTION_INDEX[f'pon_{idx}']
         return ACTION_INDEX['pass']
     if atype == 'chi':
-        last = sd.get('last_discarded_tile')
         tiles = ad.get('tiles', [])
-        if last and tiles:
-            base = _tile_index_from_str(last)
-            var = _chi_variant(last, tiles)
+        if last_discarded_tile and tiles:
+            base = _tile_index_from_str(last_discarded_tile)
+            var = _chi_variant(last_discarded_tile, tiles)
             if var in ('left', 'mid', 'right'):
                 return ACTION_INDEX[f'chi_{base}_{var}']
         return ACTION_INDEX['pass']
@@ -361,33 +367,79 @@ def _encode_policy_indices_from_action(sd: Dict[str, Any], ad: Dict[str, Any]) -
     return action_idx, tile1_idx, tile2_idx
 
 
-def _simulate_game_collecting(_unused: SimpleJong) -> Tuple[List[Tuple[int, Dict[str, Any], Dict[str, Any]]], List[int], Optional[int]]:
-    """Run a full simulated game by delegating to SimpleJong.play_round().
+class Recorder:
+    """Collects raw (actor_id, GamePerspective, action_obj) events in order.
 
-    We simulate using base `Player` instances and collect states/actions from the engine.
-
-    Returns a flat list of (actor_id, state_dict, action_dict), list of winners, and loser.
+    Storing unprocessed `GamePerspective` ensures feature parity checks can be
+    performed by re-encoding from the same information used during inference.
     """
-    # Create fresh players and wrap them so recording happens inside engine calls
-    base_players = [Player(i) for i in range(4)]
-    game = SimpleJong(base_players)
+    def __init__(self) -> None:
+        self.events: List[Tuple[int, GamePerspective, Any]] = []
+        # Optional aligned lists of policy probability vectors and legality masks per event
+        self.event_probs: List[Optional[np.ndarray]] = []
+        self.event_legal_masks: List[Optional[np.ndarray]] = []
 
-    # Let the engine run the entire game
-    game.play_round()
+    def record(
+        self,
+        gs: GamePerspective,
+        actor_id: int,
+        action_obj: Any,
+        probs: Optional[np.ndarray],
+        legal_mask: np.ndarray,
+    ) -> None:
+        self.events.append((actor_id, gs, action_obj))
+        self.event_probs.append(None if probs is None else np.asarray(probs, dtype=np.float32))
+        self.event_legal_masks.append(np.asarray(legal_mask, dtype=np.float32))
 
-    # Reconstruct a coarse log by scanning per-player discards and win flags.
-    # For dataset purposes, we need enough coverage rather than exact chronology.
+
+class RecordingPlayer(Player):
+    """Player that records the state and the chosen action/reaction."""
+    def __init__(self, player_id: int, recorder: Recorder):
+        super().__init__(player_id)
+        self._rec = recorder
+
+    def play(self, game_state: GamePerspective):  # type: ignore[override]
+        # Capture legality mask at the moment of decision
+        legal_mask = self._game.legality_mask(self.player_id)
+        action = super().play(game_state)
+        self._rec.record(game_state, self.player_id, action, None, legal_mask)
+        return action
+
+    def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]):  # type: ignore[override]
+        legal_mask = self._game.legality_mask(self.player_id)
+        reaction = super().choose_reaction(game_state, options)
+        self._rec.record(game_state, self.player_id, reaction, None, legal_mask)
+        return reaction
+
+
+def _simulate_game_collecting() -> Tuple[List[Tuple[int, Dict[str, Any], Dict[str, Any]]], List[int], Optional[int], List[np.ndarray]]:
+    """Simulate one full game capturing each player's actions and reactions with states.
+
+    Returns (log, winners, loser) where log is a list of
+    (actor_id, serialized_state, serialized_action) in chronological order.
+    """
+    recorder = Recorder()
+
+    # Always create a fresh game with recording players to ensure full coverage
+    players = [RecordingPlayer(i, recorder) for i in range(4)]
+    game_local = SimpleJong(players)
+
+    # Run the game to completion
+    game_local.play_round()
+
+    # Convert raw recorded events to serialized log and capture legality masks
     log: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
-    for pid in range(4):
-        # Build a simple state snapshot for the last known perspective
-        state = game.get_game_perspective(pid)
-        # Add a synthetic discard action for each tile this player discarded
-        for t in state.player_discards.get(pid, []):  # type: ignore[attr-defined]
-            log.append((pid, serialize_state(state), {'type': 'discard', 'tile': t}))
+    masks: List[np.ndarray] = []
+    for idx, (actor_id, gp, action_obj) in enumerate(recorder.events):
+        sd = serialize_state(gp)
+        ad = serialize_action(action_obj)
+        log.append((actor_id, sd, ad))
+        mask = recorder.event_legal_masks[idx]
+        masks.append(np.asarray(mask, dtype=bool))
 
-    winners = game.get_winners() if hasattr(game, 'get_winners') else []
-    loser = game.get_loser() if hasattr(game, 'get_loser') else None
-    return log, list(winners), loser
+    winners = game_local.get_winners()
+    loser = game_local.get_loser()
+    return log, list(winners), loser, masks
 
 
 def generate_pure_policy_dataset(
@@ -409,26 +461,36 @@ def generate_pure_policy_dataset(
     rewards: List[float] = []
     records_game_id: List[int] = []
     records_step_id: List[int] = []
+    legality_masks: List[np.ndarray] = []
 
     # Progress iterator
     iterator = tqdm(range(num_games), desc='Generating pure-policy games') if tqdm else range(num_games)
     game_counter = 0
     for game_idx in iterator:
         game_counter = int(game_idx)
-        game = SimpleJong([Player(i) for i in range(4)])
-        log, winners, loser = _simulate_game_collecting(game)
+        # Simulate a full game and collect chronological (state, action) pairs
+        log, winners, loser, masks = _simulate_game_collecting()
         per_player_rewards = _assign_rewards(4, winners, loser)
 
         # Append
         step_counter = 0
-        for actor_id, state_dict, action_dict in log:
+        for step_i, (actor_id, state_dict, action_dict) in enumerate(log):
+            # Safety: if a 'ron' action is recorded, there must be a defined loser (the discarder)
+            if action_dict.get('type') == 'ron':
+                assert loser is not None, "Recorded 'ron' action but loser is None"
             idx_state = extract_indexed_state(state_dict)
-            act_idx = encode_action_flat_index(state_dict, action_dict)
+            act_idx = encode_action_flat_index(action_dict, state_dict.get('last_discarded_tile'))
             states.append(idx_state)
             y_flat_idx.append(int(act_idx))
             rewards.append(float(per_player_rewards[actor_id]))
             records_game_id.append(game_counter)
             records_step_id.append(step_counter)
+            # Append legality mask aligned with this step
+            # step_i maps into masks
+            # Ensure shape matches num_actions
+            mask_arr = np.asarray(masks[step_i], dtype=bool)
+            assert np.sum(mask_arr) > 0, f"Found step with no legal actions: {step_i}"
+            legality_masks.append(mask_arr)
             step_counter += 1
 
         game_counter += 1
@@ -454,6 +516,7 @@ def generate_pure_policy_dataset(
     np_rewards = np.asarray(rewards, dtype=np.float32)
     np_game_ids = np.asarray(records_game_id, dtype=np.int32)
     np_step_ids = np.asarray(records_step_id, dtype=np.int32)
+    np_legal_masks = np.asarray(legality_masks, dtype=np.bool_)
 
     # Save
     np.savez(
@@ -464,6 +527,7 @@ def generate_pure_policy_dataset(
         game_ids=np_game_ids,
         step_ids=np_step_ids,
         action_labels=np.asarray(get_action_labels(), dtype=object),
+        legal_masks=np_legal_masks,
     )
 
     return out_path

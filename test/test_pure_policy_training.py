@@ -50,15 +50,16 @@ class TestPurePolicyTraining(unittest.TestCase):
         called = np.asarray(called, dtype=np.int32)
         gss = np.asarray(gss, dtype=np.float32)
 
-        # Provide explicit sample weights (normally rewards). Use zeros for this tiny test.
-        sample_w = np.zeros((states.shape[0],), dtype=np.float32)
+        # Provide explicit sample weights (normally rewards). Use ones for this tiny test.
+        sample_w = np.ones((states.shape[0],), dtype=np.float32)
         net.model.fit(
             [hands, discs, called, gss],
             {'policy_flat': y_flat},
             epochs=1,
             batch_size=max(1, min(8, states.shape[0])),
             verbose=0,
-            sample_weight={'policy_flat': sample_w},
+            sample_weight=sample_w,
+            legality_masks=(data['legal_masks'].astype(bool) if 'legal_masks' in data.files else np.ones((states.shape[0], y_flat.shape[1]), dtype=bool)),
         )
 
         # Quick forward pass
@@ -110,8 +111,18 @@ class TestPurePolicyTraining(unittest.TestCase):
 
         torch.cuda.reset_peak_memory_stats()
         mem_before = torch.cuda.memory_allocated()
-        # One brief epoch to allocate and run on GPU
-        net.model.fit([hands, discs, called, gss], {'policy_flat': y_flat}, epochs=1, batch_size=max(1, min(8, states.shape[0])), verbose=0, shuffle=False)
+        # One brief epoch to allocate and run on GPU (with ones sample weight)
+        sample_w = np.ones((states.shape[0],), dtype=np.float32)
+        net.model.fit(
+            [hands, discs, called, gss],
+            {'policy_flat': y_flat},
+            epochs=1,
+            batch_size=max(1, min(8, states.shape[0])),
+            verbose=0,
+            shuffle=False,
+            sample_weight=sample_w,
+            legality_masks=(data['legal_masks'].astype(bool) if 'legal_masks' in data.files else np.ones((states.shape[0], y_flat.shape[1]), dtype=bool)),
+        )
         mem_after = torch.cuda.memory_allocated()
         peak = torch.cuda.max_memory_allocated()
         self.assertTrue((mem_after > mem_before) or (peak > mem_before), 'Expected GPU memory usage to increase during training')

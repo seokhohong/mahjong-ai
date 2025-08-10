@@ -12,7 +12,7 @@ except Exception as e:  # pragma: no cover
     TORCH_AVAILABLE = False
     raise ImportError('PyTorch is required for training. Please install torch.') from e
 
-from .pure_policy import PurePolicyNetwork
+from src.core.learn.pure_policy import PurePolicyNetwork
 
 
 def _batch_from_states(states_obj: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -67,9 +67,38 @@ def train_policy_gradient(
     states = data['states']
     y_flat = data['y_flat']
     rewards = data['rewards'].astype(np.float32)
+    legal_masks = data['legal_masks'].astype(np.bool_) if 'legal_masks' in data.files else None
+    game_ids = data['game_ids'].astype(np.int64) if 'game_ids' in data.files else None
 
     # Build inputs
     hands, discs, called, gss = _batch_from_states(states)
+
+    # Create a holdout split by complete games (20%) for overfitting detection
+    num_samples = hands.shape[0]
+    if game_ids is None:
+        # Fallback: simple last-20% split if game ids are missing
+        split_idx = max(1, int(0.8 * num_samples))
+        train_idx = np.arange(0, split_idx)
+        hold_idx = np.arange(split_idx, num_samples)
+    else:
+        unique_games = np.unique(game_ids)
+        rng = np.random.RandomState(42)
+        rng.shuffle(unique_games)
+        split_g = max(1, int(0.8 * len(unique_games)))
+        train_games = set(unique_games[:split_g].tolist())
+        hold_games = set(unique_games[split_g:].tolist())
+        train_mask = np.array([gid in train_games for gid in game_ids], dtype=bool)
+        hold_mask = np.array([gid in hold_games for gid in game_ids], dtype=bool)
+        train_idx = np.where(train_mask)[0]
+        hold_idx = np.where(hold_mask)[0]
+
+    # Slice arrays
+    hands_tr, discs_tr, called_tr, gss_tr = hands[train_idx], discs[train_idx], called[train_idx], gss[train_idx]
+    y_tr, w_tr = y_flat[train_idx], rewards[train_idx]
+    lm_tr = legal_masks[train_idx] if legal_masks is not None else None
+    hands_ho, discs_ho, called_ho, gss_ho = hands[hold_idx], discs[hold_idx], called[hold_idx], gss[hold_idx]
+    y_ho, w_ho = y_flat[hold_idx], rewards[hold_idx]
+    lm_ho = legal_masks[hold_idx] if legal_masks is not None else None
 
     # Build model
     net = PurePolicyNetwork(
@@ -116,24 +145,29 @@ def train_policy_gradient(
 
     # Prepare targets and sample weights
     targets: Dict[str, np.ndarray] = {
-        'policy_flat': y_flat,
+        'policy_flat': y_tr,
     }
-    sample_weight: Dict[str, np.ndarray] = {
-        'policy_flat': rewards,
-    }
+    sample_weight: np.ndarray = w_tr
     # No value head in the pure-policy model
 
     # Fit
     net.model.fit(
-        [hands, discs, called, gss],
+        [hands_tr, discs_tr, called_tr, gss_tr],
         targets,
-        sample_weight=sample_weight,
         epochs=epochs,
-        batch_size=min(batch_size, hands.shape[0] if hands.shape[0] > 0 else 1),
+        batch_size=min(batch_size, hands_tr.shape[0] if hands_tr.shape[0] > 0 else 1),
         verbose=verbose,
         shuffle=True,
         early_stopping_patience=early_stopping_patience,
+        sample_weight=sample_weight,
+        val_x_list=[hands_ho, discs_ho, called_ho, gss_ho],
+        val_targets={'policy_flat': y_ho},
+        val_sample_weight=w_ho,
+        legality_masks=lm_tr,
+        val_legality_masks=lm_ho,
     )
+
+    # Metrics are reported per-epoch by the model.fit when validation is provided.
 
     # Save
     if not model_out.endswith('.pt'):
@@ -154,7 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (epochs without improvement)')
     parser.add_argument('--hidden', type=int, default=128)
     parser.add_argument('--embed', type=int, default=4)
-    from ..constants import MAX_TURNS as CONST_MAX_TURNS
+    from src.core.constants import MAX_TURNS as CONST_MAX_TURNS
     parser.add_argument('--max_turns', type=int, default=int(CONST_MAX_TURNS))
     args = parser.parse_args()
 

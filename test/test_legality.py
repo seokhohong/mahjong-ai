@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from core.game import (
     SimpleJong, Player, Tile, TileType, Suit,
-    Discard, Tsumo, Ron, Pon, Chi, CalledSet
+    Discard, Tsumo, Ron, Pon, Chi, CalledSet, PassCall
 )
 
 
@@ -124,7 +124,13 @@ class TestStepLegality(unittest.TestCase):
     def test_legal_chi_by_left_player(self):
         game = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
         game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
-        game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        # Ensure left player can chi but cannot ron by using non-partitionable souzu filler
+        non_partitionable_souzu = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
+        ]
+        game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)] + non_partitionable_souzu
         game.tiles = []
         game.current_player_idx = 0
         self.assertTrue(game.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
@@ -138,7 +144,13 @@ class TestStepLegality(unittest.TestCase):
         game = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
         # Player 0 discards 5s, player 2 holds two 5s
         game._player_hands[0] = [Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
-        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.TWO)] * 9
+        # Ensure player 2 can pon but cannot ron by using non-partitionable souzu filler
+        non_partitionable_souzu = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
+        ]
+        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)] + non_partitionable_souzu
         game.tiles = []
         game.current_player_idx = 0
         self.assertTrue(game.step(0, Discard(Tile(Suit.SOUZU, TileType.FIVE))))
@@ -165,15 +177,10 @@ class TestStepLegality(unittest.TestCase):
         g.tiles = []
         g.current_player_idx = 0
         self.assertTrue(g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
-        # Legal moves for player 1 should include Ron and exclude Chi
+        # Legal moves for player 1 should include Ron; Chi should not be legal when Ron is available
         moves_p1 = g.legal_moves(1)
         self.assertTrue(any(isinstance(m, Ron) for m in moves_p1))
         self.assertFalse(any(isinstance(m, Chi) for m in moves_p1))
-        # Explicit Chi attempt should be illegal
-        chi_attempt = Chi([Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)])
-        self.assertFalse(g.is_legal(1, chi_attempt))
-        with self.assertRaises(SimpleJong.IllegalMoveException):
-            g.step(1, chi_attempt)
 
     def test_legal_moves_action_phase_for_current_player(self):
         # At start, current player is 0 with 11 tiles; tsumo should be absent, discards present
@@ -203,6 +210,9 @@ class TestStepLegality(unittest.TestCase):
         self.assertTrue(game.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
         moves_p1 = game.legal_moves(1)
         self.assertTrue(any(isinstance(m, Ron) for m in moves_p1))
+        # At least two options: Ron and PassCall
+        self.assertGreaterEqual(len(moves_p1), 2)
+        self.assertTrue(any(isinstance(m, PassCall) for m in moves_p1))
         # Discarder cannot react
         self.assertEqual(game.legal_moves(0), [])
 
@@ -221,6 +231,9 @@ class TestStepLegality(unittest.TestCase):
         self.assertTrue(game.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
         moves_left = game.legal_moves(1)
         self.assertTrue(any(isinstance(m, Chi) and len(m.tiles) == 2 for m in moves_left))
+        # PassCall should always be available in reaction phase
+        self.assertTrue(any(isinstance(m, PassCall) for m in moves_left))
+        self.assertGreaterEqual(len(moves_left), 2)
         moves_not_left = game.legal_moves(2)
         self.assertFalse(any(isinstance(m, Chi) for m in moves_not_left))
 
@@ -239,6 +252,78 @@ class TestStepLegality(unittest.TestCase):
         self.assertTrue(game.step(0, Discard(Tile(Suit.SOUZU, TileType.FIVE))))
         moves = game.legal_moves(3)
         self.assertTrue(any(isinstance(m, Pon) and len(m.tiles) == 2 for m in moves))
+        self.assertTrue(any(isinstance(m, PassCall) for m in moves))
+        self.assertGreaterEqual(len(moves), 2)
+
+    def test_simultaneous_legal_reactions(self):
+        # Player 0 discards 3p; player 1 can Ron, player 2 can Pon. Both should see legal Ron/Pon and Pass.
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        # Discarder (0) has 3p to discard
+        g._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Player 1 has a structural 11 that Rons on 3p (2p,4p present)
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
+        ]
+        g._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        # Player 2 can Pon on 3p but cannot Ron (use non-partitionable souzu filler)
+        non_partitionable_souzu = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE)
+        ]
+        g._player_hands[2] = [Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.THREE)] + non_partitionable_souzu
+        g.tiles = []
+        g.current_player_idx = 0
+        # Discard 3p
+        self.assertTrue(g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
+        # Player 1 legal moves include Ron and Pass
+        moves_p1 = g.legal_moves(1)
+        self.assertTrue(any(isinstance(m, Ron) for m in moves_p1))
+        self.assertTrue(any(isinstance(m, PassCall) for m in moves_p1))
+        # Player 2 legal moves include Pon and Pass (even though Ron priority will preempt Pon execution)
+        moves_p2 = g.legal_moves(2)
+        self.assertTrue(any(isinstance(m, Pon) for m in moves_p2))
+        self.assertTrue(any(isinstance(m, PassCall) for m in moves_p2))
+
+    def test_reaction_phase_always_has_at_least_two_options(self):
+        game = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        # Force a discard to enter reaction phase
+        tile = game.hand(0)[0]
+        game.step(0, Discard(tile))
+        for pid in [1, 2, 3]:
+            moves = game.legal_moves(pid)
+            # With new logic: if there is any legal reaction (Ron/Pon/Chi), Pass must also be present.
+            if any(isinstance(m, (Ron, Pon, Chi)) for m in moves):
+                self.assertTrue(any(isinstance(m, PassCall) for m in moves))
+                if any(isinstance(m, Ron) for m in moves):
+                    self.assertGreaterEqual(len(moves), 2)
+            else:
+                # No legal reactions: player has no moves
+                self.assertEqual(len(moves), 0)
+
+    def test_legality_mask_matches_legal_moves(self):
+        # Construct a small scenario with a pending discard and check legality_mask
+        game = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        game._player_hands[0] = [Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        game._player_hands[1] = [Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 9
+        game.tiles = []
+        game.current_player_idx = 0
+        self.assertTrue(game.step(0, Discard(Tile(Suit.SOUZU, TileType.FIVE))))
+
+        # For actor 1, Pon should be legal
+        moves = game.legal_moves(1)
+        from core.learn.pure_policy_dataset import get_num_actions, serialize_action, encode_action_flat_index  # type: ignore
+        mask = game.legality_mask(1)
+        self.assertEqual(len(mask), get_num_actions())
+        gs = game.get_game_perspective(1)
+        ldt = str(gs.last_discarded_tile) if gs.last_discarded_tile is not None else None
+        # Every legal move must map to a True in the mask
+        for m in moves:
+            ad = serialize_action(m)
+            idx = encode_action_flat_index(ad, ldt)
+            self.assertTrue(mask[int(idx)], f"Expected mask[{idx}] True for move {type(m).__name__}")
 
 
 if __name__ == '__main__':

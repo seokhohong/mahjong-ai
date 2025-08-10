@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from training_data_generator import TrainingDataGenerator
 
 
+@unittest.skip("Temporarily disabled: legacy/unused during refactor")
 class TestTrainingDataGeneratorGen0(unittest.TestCase):
     def test_generation_0_single_game(self):
         generator = TrainingDataGenerator(

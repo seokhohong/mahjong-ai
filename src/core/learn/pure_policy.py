@@ -306,13 +306,22 @@ class _KerasLikeWrapper:
         batch_size: int = 8,
         verbose: int = 0,
         shuffle: bool = True,
-        sample_weight: Optional[Dict[str, np.ndarray]] = None,
+        sample_weight: np.ndarray = None,
         early_stopping_patience: int = 5,
-    ):
+        val_x_list: Optional[List[np.ndarray]] = None,
+        val_targets: Optional[Dict[str, np.ndarray]] = None,
+        val_sample_weight: Optional[np.ndarray] = None,
+        legality_masks: np.ndarray = None,
+        val_legality_masks: Optional[np.ndarray] = None,
+        ):
+        """
+        Enhanced policy gradient training with better metrics and stability.
+        """
         try:
             hands, discs, called, gss = x_list
         except Exception:
             return self
+        
         y_flat = y.get('policy_flat') if isinstance(y, dict) else None
         if y_flat is None:
             return self
@@ -320,23 +329,75 @@ class _KerasLikeWrapper:
         # Precompute flattened features and labels
         xb_np = self._precompute_flat(hands, discs, called, gss)
         labels_np = np.argmax(y_flat, axis=1).astype(np.int64)
-        weights_np = None
-        if sample_weight and 'policy_flat' in sample_weight:
-            weights_np = sample_weight['policy_flat'].astype(np.float32)
-
+        
+        # Require rewards for policy-gradient training
+        if sample_weight is None:
+            raise ValueError("sample_weight (rewards) is required for policy-gradient training")
+        # Require legality masks for training to enforce rules during learning
+        if legality_masks is None:
+            raise ValueError("legality_masks is required for training")
+        # Use RAW rewards for both training and metrics (no normalization)
+        original_rewards = sample_weight.astype(np.float32)
+        
         device = self._owner._device
         xb = torch.from_numpy(xb_np).to(device)
         yb_all = torch.from_numpy(labels_np).to(device)
-        wb_all = torch.from_numpy(weights_np).to(device) if weights_np is not None else None
+        # Legality masks (required)
+        try:
+            lm_all = torch.from_numpy(legality_masks.astype(bool)).to(device)
+            if lm_all.ndim != 2 or lm_all.shape[0] != xb.shape[0] or lm_all.shape[1] != self._owner._num_actions:
+                raise ValueError("legality_masks must have shape (N, num_actions)")
+            # Assert every sample has at least one legal action
+            per_row_any = lm_all.any(dim=1)
+            if not bool(per_row_any.all().item()):
+                # Collect a few offending indices for debugging
+                bad_idx = torch.nonzero(~per_row_any, as_tuple=False).view(-1).tolist()
+                preview = bad_idx[:10]
+                raise AssertionError(
+                    f"Found {len(bad_idx)} samples with no legal actions in legality_masks. "
+                    f"Example indices: {preview}"
+                )
+        except Exception as e:
+            raise ValueError(f"Invalid legality_masks: {e}")
+        
+        # Use RAW rewards for training (policy gradient) and for categorization/metrics
+        orig_rewards_all = torch.from_numpy(original_rewards).to(device)
+        wb_all = orig_rewards_all
 
-        # Optimizer and policy-gradient loss
+        # Setup optimizer with optional learning rate scheduling
         optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=1e-4)
-        def policy_gradient_loss(logits: torch.Tensor, actions: torch.Tensor, advantages) -> torch.Tensor:
-            # Clamp logits to avoid extreme gradients
-            logits = torch.clamp(logits, min=-5.0, max=5.0)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=2, verbose=False
+        )
+        
+        def policy_gradient_loss(logits: torch.Tensor, actions: torch.Tensor, 
+                                advantages: torch.Tensor, entropy_weight: float = 0.01):
+            """
+            Policy gradient loss with entropy regularization.
+            Returns loss, entropy, and action probabilities for metrics.
+            """
+            # Clamp logits for stability
+            logits = torch.clamp(logits, min=-10.0, max=10.0)
+            
+            # Calculate log probabilities and probabilities
             log_probs = F.log_softmax(logits, dim=-1)
+            probs = F.softmax(logits, dim=-1)
+            
+            # Get action log probabilities
             action_log_probs = log_probs.gather(1, actions.view(-1, 1)).squeeze(1)
-            return -(action_log_probs * advantages).mean()
+            action_probs = probs.gather(1, actions.view(-1, 1)).squeeze(1)
+            
+            # Policy gradient loss
+            pg_loss = -(action_log_probs * advantages).mean()
+            
+            # Entropy for exploration
+            entropy = -(probs * log_probs).sum(dim=-1).mean()
+            
+            # Combined loss
+            total_loss = pg_loss - entropy_weight * entropy
+            
+            return total_loss, entropy, action_probs
+        
         self._owner._net.train()
 
         from tqdm import tqdm  # type: ignore
@@ -344,80 +405,306 @@ class _KerasLikeWrapper:
         num_samples = xb.shape[0]
         bs = max(1, min(batch_size, num_samples))
 
-        best_acc: float = -1.0
-        epochs_no_improve: int = 0
+        # Tracking metrics
+        best_metric = -float('inf')
+        epochs_no_improve = 0
+        history = {
+            'loss': [], 'entropy': [], 'win_prob': [], 'lose_prob': [], 
+            'neutral_prob': [], 'performance': [], 'win_count': [], 'lose_count': [], 'neutral_count': []
+        }
+
+        # Precompute validation features/labels/weights if provided
+        val_flat: Optional[np.ndarray] = None
+        val_labels: Optional[np.ndarray] = None
+        val_weights: Optional[np.ndarray] = None
+        if val_x_list is not None and val_targets is not None:
+            vh, vd, vc, vg = val_x_list
+            vy_flat = val_targets.get('policy_flat') if isinstance(val_targets, dict) else None
+            if vy_flat is not None:
+                val_flat = self._precompute_flat(vh, vd, vc, vg)
+                val_labels = np.argmax(vy_flat, axis=1).astype(np.int64)
+                if val_sample_weight is not None:
+                    val_weights = val_sample_weight.astype(np.float32)
+        
         for ep in range(max(1, epochs)):
             indices = torch.arange(num_samples, device=device)
             if shuffle:
                 indices = indices[torch.randperm(num_samples, device=device)]
+            
             total_batches = (num_samples + bs - 1) // bs
-            running_loss = 0.0
-            naive_correct = 0.0
-            naive_samples = 0
-            win_correct = 0.0
+            
+            # Epoch metrics
+            epoch_loss = 0.0
+            epoch_entropy = 0.0
+            win_probs, lose_probs, neutral_probs = [], [], []
+            # For top-K actions over win samples
+            win_action_prob_sum = np.zeros((self._owner._num_actions,), dtype=np.float64)
+            win_correct = 0
             win_samples = 0
+            # Track CE/PG on train
+            ce_sum = 0.0
+            pg_sum = 0.0
+            
+            # Progress bar
             bar = None
             if verbose:
                 bar = tqdm(range(total_batches), desc=f"Epoch {ep+1}/{epochs}", leave=False) if tqdm else None
                 if bar is None:
                     print(f"Epoch {ep+1}/{epochs}")
-            bi = 0
+            
+            batch_idx = 0
             for start in range(0, num_samples, bs):
                 end = min(num_samples, start + bs)
                 idx = indices[start:end]
                 xb_b = xb.index_select(0, idx)
                 yb = yb_all.index_select(0, idx)
+                
+                # Use RAW rewards for training (policy gradient)
                 wb = wb_all.index_select(0, idx)
+                orig_rewards = orig_rewards_all.index_select(0, idx)
+                
                 optimizer.zero_grad(set_to_none=True)
+                
+                # Forward pass
                 logits = self._owner._net(xb_b)
-                loss = policy_gradient_loss(logits, yb, wb)
+                # Apply legality mask to logits
+                lm = lm_all.index_select(0, idx)
+                logits = logits.masked_fill(~lm, -1e9)
+                loss, entropy, action_probs = policy_gradient_loss(logits, yb, wb)
+                
+                # Backward pass with gradient clipping
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self._owner._net.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                running_loss += float(loss.detach().cpu().item())
+                # Collect metrics
                 with torch.no_grad():
+                    epoch_loss += loss.item()
+                    epoch_entropy += entropy.item()
+                    
+                    # Predictions for metrics
                     preds = torch.argmax(logits, dim=-1)
                     eq = (preds == yb).float()
-                    naive_correct += float(eq.sum().item())
-                    naive_samples += int(yb.shape[0])
-                    # win_acc: only count samples with reward weight exactly +1
-                    if wb is not None:
-                        win_mask = (wb == 1.0)
-                        if win_mask.any():
-                            win_correct += float(eq[win_mask].sum().item())
-                            win_samples += int(win_mask.sum().item())
 
-                bi += 1
-                if verbose:
-                    naive_val = naive_correct / max(1.0, float(naive_samples))
-                    win_val = (win_correct / float(win_samples)) if win_samples > 0 else 0.0
-                    if bar is not None:
-                        bar.set_postfix({
-                            "loss": f"{running_loss/bi:.4f}",
-                            "naive_acc": f"{naive_val:.4f}",
-                            "win_acc": f"{win_val:.4f}",
-                        })
-                        bar.update(1)
-                    elif bi % 10 == 0:
-                        print(f"  step {bi:4d}/{total_batches} - loss: {running_loss/bi:.4f} - naive_acc: {naive_val:.4f} - win_acc: {win_val:.4f}")
-            epoch_naive = (naive_correct / max(1.0, float(naive_samples)))
-            epoch_win = (win_correct / float(win_samples)) if win_samples > 0 else 0.0
-            if verbose and bar is not None:
-                bar.close()
-                print(f"Epoch {ep+1}/{epochs} - avg loss: {running_loss/max(1, bi):.4f} - naive_acc: {epoch_naive:.4f} - win_acc: {epoch_win:.4f}")
+                    # CE/PG loss components on train
+                    neg_logp = -torch.log(action_probs + 1e-8)
+                    ce_sum += neg_logp.sum().item()
+                    
+                    # CRITICAL FIX: Use ORIGINAL rewards for categorization, not normalized advantages
 
-            # Early stopping on win_acc plateau
-            if epoch_win > best_acc:
-                best_acc = epoch_win
+                    # Win actions (reward = 1)
+                    win_mask = (orig_rewards == 1.0)
+                    if win_mask.any():
+                        win_probs.extend(action_probs[win_mask].cpu().numpy())
+                        win_correct += eq[win_mask].sum().item()
+                        win_samples += win_mask.sum().item()
+                        # Accumulate full-policy probabilities for top-K analysis
+                        probs_full = F.softmax(logits, dim=-1)
+                        win_action_prob_sum += probs_full[win_mask].sum(dim=0).cpu().numpy()
+                    # PG loss term: -(reward * log pi(a|s))
+                    pg_sum += (-(orig_rewards * torch.log(action_probs + 1e-8))).sum().item()
+
+                    # Lose actions (reward = -1)
+                    lose_mask = (orig_rewards == -1.0)
+                    if lose_mask.any():
+                        lose_probs.extend(action_probs[lose_mask].cpu().numpy())
+
+                    # Neutral actions (reward = 0)
+                    neutral_mask = (orig_rewards == 0.0)
+                    if neutral_mask.any():
+                        neutral_probs.extend(action_probs[neutral_mask].cpu().numpy())
+                
+                batch_idx += 1
+                if verbose and bar is not None:
+                    avg_win_prob = np.mean(win_probs) if win_probs else 0.0
+                    avg_lose_prob = np.mean(lose_probs) if lose_probs else 0.0
+                    
+                    bar.set_postfix({
+                        "loss": f"{epoch_loss/batch_idx:.4f}",
+                        "win_π": f"{avg_win_prob:.3f}",
+                        "lose_π": f"{avg_lose_prob:.3f}",
+                    })
+                    bar.update(1)
+            
+            # Calculate epoch statistics
+            epoch_loss /= max(1, batch_idx)
+            epoch_entropy /= max(1, batch_idx)
+            
+            # Calculate average probabilities
+            avg_win_prob = np.mean(win_probs) if win_probs else 0.0
+            avg_lose_prob = np.mean(lose_probs) if lose_probs else 0.0
+            avg_neutral_prob = np.mean(neutral_probs) if neutral_probs else 0.0
+            
+            # Count samples in each category
+            win_count = len(win_probs)
+            lose_count = len(lose_probs)
+            neutral_count = len(neutral_probs)
+            
+            # Key performance metric: difference between win and lose probabilities
+            performance = avg_win_prob - avg_lose_prob
+            
+            # Store history
+            history['loss'].append(epoch_loss)
+            history['entropy'].append(epoch_entropy)
+            history['win_prob'].append(avg_win_prob)
+            history['lose_prob'].append(avg_lose_prob)
+            history['neutral_prob'].append(avg_neutral_prob)
+            history['performance'].append(performance)
+            history['win_count'].append(win_count)
+            history['lose_count'].append(lose_count)
+            history['neutral_count'].append(neutral_count)
+            
+            # Update learning rate based on performance
+            scheduler.step(performance)
+            
+            if verbose:
+                if bar is not None:
+                    bar.close()
+                
+                # Normalize by total samples seen in epoch
+                total_samples = max(1, num_samples)
+                train_ce = ce_sum / total_samples
+                train_pg = pg_sum / total_samples
+                print(f"\nEpoch {ep+1}/{epochs} Summary:")
+                print(f"  Loss: {epoch_loss:.4f} | Entropy: {epoch_entropy:.4f}")
+                print(f"  Train -> CE: {train_ce:.4f} | PG: {train_pg:.4f}")
+                print(f"  Sample Counts -> Win: {win_count} | Lose: {lose_count} | Neutral: {neutral_count}")
+                print(f"  Policy Probs -> Win: {avg_win_prob:.4f} | Lose: {avg_lose_prob:.4f} | Neutral: {avg_neutral_prob:.4f}")
+                # Top-10 actions by average probability over winning samples
+                if win_samples > 0:
+                    avg_action_probs_win = (win_action_prob_sum / max(1, int(win_samples))).astype(np.float64)
+                    top_idx = np.argsort(avg_action_probs_win)[-10:][::-1]
+                    try:
+                        from .pure_policy_dataset import get_action_labels  # type: ignore
+                        labels = get_action_labels()
+                    except Exception:
+                        labels = [str(i) for i in range(len(avg_action_probs_win))]
+
+                    # Make labels human readable: translate discard_i and pon_i to tile strings
+                    def _pretty(label: str) -> str:
+                        if label.startswith('discard_'):
+                            try:
+                                ti = int(label.split('_', 1)[1])
+                                rank = (ti // 2) + 1
+                                suit = 'p' if (ti % 2) == 0 else 's'
+                                return f'discard_{rank}{suit}'
+                            except Exception:
+                                return label
+                        if label.startswith('pon_'):
+                            try:
+                                ti = int(label.split('_', 1)[1])
+                                rank = (ti // 2) + 1
+                                suit = 'p' if (ti % 2) == 0 else 's'
+                                return f'pon_{rank}{suit}'
+                            except Exception:
+                                return label
+                        if label.startswith('chi_'):
+                            # chi_{tileIdx}_{variant}
+                            try:
+                                _, ti, var = label.split('_', 2)
+                                ti = int(ti)
+                                rank = (ti // 2) + 1
+                                suit = 'p' if (ti % 2) == 0 else 's'
+                                return f'chi_{rank}{suit}_{var}'
+                            except Exception:
+                                return label
+                        return label
+
+                    print("  Train (wins) top actions:")
+                    for rank_i, ai in enumerate(top_idx, 1):
+                        print(f"    {rank_i}. {_pretty(labels[ai])}: {avg_action_probs_win[ai]:.4f}")
+                    # Also report ron and tsumo average probabilities over wins
+                    try:
+                        ron_idx = labels.index('ron')
+                        tsumo_idx = labels.index('tsumo')
+                    except ValueError:
+                        ron_idx, tsumo_idx = 1, 2  # Fallback to standard indices
+                    print(f"  Train (wins) ron: {avg_action_probs_win[ron_idx]:.4f} | tsumo: {avg_action_probs_win[tsumo_idx]:.4f}")
+                
+                if avg_win_prob > 0 and avg_lose_prob > 0:
+                    ratio = avg_win_prob / avg_lose_prob
+                    print(f"  Win/Lose Ratio: {ratio:.2f}x | Performance: {performance:.4f}")
+                elif avg_lose_prob == 0:
+                    print(f"  WARNING: No lose samples found in this epoch! Check data distribution.")
+                
+                print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+
+                # Validation metrics per epoch if provided
+                if val_flat is not None and val_labels is not None:
+                    with torch.no_grad():
+                        logits_val = self._owner._net(torch.from_numpy(val_flat).to(device))
+                        # Apply validation legality mask if provided
+                        if val_legality_masks is not None:
+                            try:
+                                lm_val = torch.from_numpy(val_legality_masks.astype(bool)).to(logits_val.device)
+                                if lm_val.shape == logits_val.shape:
+                                    logits_val = logits_val.masked_fill(~lm_val, -1e9)
+                                elif lm_val.ndim == 2 and lm_val.shape[1] == logits_val.shape[1]:
+                                    logits_val = logits_val.masked_fill(~lm_val, -1e9)
+                            except Exception:
+                                pass
+                        log_probs_val = F.log_softmax(logits_val, dim=-1)
+                        # CE and chosen action probabilities
+                        idx = torch.arange(len(val_labels), device=logits_val.device)
+                        labels_t = torch.from_numpy(val_labels).to(logits_val.device)
+                        true_logp_val = log_probs_val[idx, labels_t]
+                        ce_val = float((-true_logp_val).mean().cpu().item()) if val_labels.size > 0 else 0.0
+                        action_prob_val = torch.exp(true_logp_val).cpu().numpy()
+                        # PG
+                        if val_weights is not None and val_weights.size == val_labels.size:
+                            vw = torch.from_numpy(val_weights).to(logits_val.device)
+                            pg_val = float((-(vw * true_logp_val)).mean().cpu().item())
+                            win_mask_val = (vw == 1.0).cpu().numpy()
+                            lose_mask_val = (vw == -1.0).cpu().numpy()
+                            neutral_mask_val = (vw == 0.0).cpu().numpy()
+                        else:
+                            pg_val = ce_val
+                            win_mask_val = np.zeros_like(val_labels, dtype=bool)
+                            lose_mask_val = np.zeros_like(val_labels, dtype=bool)
+                            neutral_mask_val = np.zeros_like(val_labels, dtype=bool)
+                    # Aggregate holdout policy probs and counts
+                    ho_win_prob = float(np.mean(action_prob_val[win_mask_val])) if np.any(win_mask_val) else 0.0
+                    ho_lose_prob = float(np.mean(action_prob_val[lose_mask_val])) if np.any(lose_mask_val) else 0.0
+                    ho_neutral_prob = float(np.mean(action_prob_val[neutral_mask_val])) if np.any(neutral_mask_val) else 0.0
+                    ho_win_count = int(np.sum(win_mask_val))
+                    ho_lose_count = int(np.sum(lose_mask_val))
+                    ho_neutral_count = int(np.sum(neutral_mask_val))
+                    ho_performance = ho_win_prob - ho_lose_prob
+                    # Print holdout metrics aligned with train
+                    print(f"  Holdout -> CE: {ce_val:.4f} | PG: {pg_val:.4f}")
+                    print(f"            Sample Counts -> Win: {ho_win_count} | Lose: {ho_lose_count} | Neutral: {ho_neutral_count}")
+                    print(f"            Policy Probs -> Win: {ho_win_prob:.4f} | Lose: {ho_lose_prob:.4f} | Neutral: {ho_neutral_prob:.4f}")
+                    if ho_win_prob > 0 and ho_lose_prob > 0:
+                        print(f"            Win/Lose Ratio: {ho_win_prob/ho_lose_prob:.2f}x | Performance: {ho_performance:.4f}")
+                    elif ho_lose_prob == 0:
+                        print(f"            WARNING: No lose samples found in HOLDOUT! Check data distribution.")
+            
+            # Early stopping based on performance metric (avg_win_prob - avg_lose_prob)
+            if performance > best_metric:
+                best_metric = performance
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
                 if early_stopping_patience > 0 and epochs_no_improve >= early_stopping_patience:
                     if verbose:
-                        print(f"Early stopping at epoch {ep+1}: no win_acc improvement in {early_stopping_patience} epoch(s). Best win_acc={best_acc:.4f}")
+                        print(f"\nEarly stopping at epoch {ep+1}:")
+                        print(f"  No improvement in {early_stopping_patience} epochs")
+                        print(f"  Best performance: {best_metric:.4f}")
                     break
-
+        
+        # Store training history for analysis
+        self.training_history = history
+        
+        if verbose:
+            print("\n" + "="*50)
+            print("Training Complete!")
+            print(f"Final Performance: {history['performance'][-1]:.4f}")
+            if history['lose_prob'][-1] > 0:
+                print(f"Final Win/Lose Ratio: {history['win_prob'][-1]/max(0.001, history['lose_prob'][-1]):.2f}x")
+            else:
+                print("Warning: No lose samples in final epoch")
+            print("="*50)
+        
         self._owner._net.eval()
         return self
 
@@ -429,260 +716,3 @@ class _KerasLikeWrapper:
             probs = F.softmax(logits, dim=-1).cpu().numpy()
         return probs
 
-
-class OptimizedKerasLikeWrapper:
-    """Optimized wrapper with proper PyTorch training pipeline."""
-
-    def __init__(self, owner):
-        self._owner = owner
-
-    def fit(self, x_list: List[np.ndarray], y: Dict[str, np.ndarray], 
-            epochs: int = 1, batch_size: int = 8, verbose: int = 0, 
-            shuffle: bool = True, sample_weight: Optional[Dict[str, np.ndarray]] = None):
-        
-        hands, discs, called, gss = x_list
-        
-        y_flat = y.get('policy_flat') if isinstance(y, dict) else None
-        if y_flat is None:
-            return self
-
-        print("Preprocessing features (this should happen once)...")
-        
-        # OPTIMIZATION 1: Preprocess all features ONCE, not per epoch
-        all_features = self._preprocess_all_features(hands, discs, called, gss)
-        all_labels = torch.from_numpy(np.argmax(y_flat, axis=1)).long()
-        
-        # Handle sample weights
-        weights_tensor = None
-        if sample_weight and 'policy_flat' in sample_weight:
-            weights_tensor = torch.from_numpy(sample_weight['policy_flat']).float()
-
-        # OPTIMIZATION 2: Use PyTorch DataLoader for efficient batching
-        if weights_tensor is not None:
-            dataset = TensorDataset(all_features, all_labels, weights_tensor)
-        else:
-            dataset = TensorDataset(all_features, all_labels)
-        
-        dataloader = DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle,
-            pin_memory=True,  # Faster CPU->GPU transfers
-            num_workers=0     # Can increase if CPU preprocessing is heavy
-        )
-
-        # Setup training
-        criterion = nn.CrossEntropyLoss(reduction='none')
-        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=1e-3)
-        self._owner._net.train()
-
-        for epoch_idx in range(epochs):
-            running_loss = 0.0
-            naive_correct = 0.0
-            naive_samples = 0
-            win_correct = 0.0
-            win_samples = 0
-            
-            if verbose:
-                pbar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}/{epochs}")
-            else:
-                pbar = dataloader
-
-            for batch_data in pbar:
-                if weights_tensor is not None:
-                    xb, yb, wb = batch_data
-                    wb = wb.to(self._owner._device, non_blocking=True)
-                else:
-                    xb, yb = batch_data
-                    wb = None
-                
-                # OPTIMIZATION 3: Move to GPU with non_blocking for speed
-                xb = xb.to(self._owner._device, non_blocking=True)
-                yb = yb.to(self._owner._device, non_blocking=True)
-                
-                # Forward pass
-                optimizer.zero_grad(set_to_none=True)
-                logits = self._owner._net(xb)
-                
-                # Loss calculation
-                loss_vec = criterion(logits, yb)
-                if wb is not None:
-                    loss = (loss_vec * wb).mean()
-                else:
-                    loss = loss_vec.mean()
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                
-                # Statistics
-                batch_size_actual = xb.size(0)
-                running_loss += loss.item() * batch_size_actual
-                
-                with torch.no_grad():
-                    preds = torch.argmax(logits, dim=-1)
-                    eq = (preds == yb).float()
-                    naive_correct += float(eq.sum().item())
-                    naive_samples += int(batch_size_actual)
-                    if wb is not None:
-                        win_mask = (wb == 1.0)
-                        if win_mask.any():
-                            win_correct += float(eq[win_mask].sum().item())
-                            win_samples += int(win_mask.sum().item())
-                
-                if verbose:
-                    naive_acc = naive_correct / max(1, naive_samples)
-                    win_acc = (win_correct / win_samples) if win_samples > 0 else 0.0
-                    pbar.set_postfix({
-                        "loss": f"{running_loss/max(1, naive_samples):.4f}", 
-                        "naive_acc": f"{naive_acc:.4f}",
-                        "win_acc": f"{win_acc:.4f}"
-                    })
-            
-            if verbose:
-                final_loss = running_loss / max(1, naive_samples)
-                final_naive = naive_correct / max(1, naive_samples)
-                final_win = (win_correct / win_samples) if win_samples > 0 else 0.0
-                print(f"Epoch {epoch_idx+1}/{epochs} - loss: {final_loss:.4f} - naive_acc: {final_naive:.4f} - win_acc: {final_win:.4f}")
-
-        self._owner._net.eval()
-        return self
-
-    def _preprocess_all_features(self, hands: np.ndarray, discs: np.ndarray, 
-                                called: np.ndarray, gss: np.ndarray) -> torch.Tensor:
-        """
-        OPTIMIZATION 4: Vectorized feature preprocessing
-        Convert all samples to features in one go, not sample by sample
-        """
-        num_samples = hands.shape[0]
-        flat_features = []
-        
-        # Process in larger chunks for memory efficiency
-        chunk_size = min(1000, num_samples)
-        
-        for start_idx in range(0, num_samples, chunk_size):
-            end_idx = min(start_idx + chunk_size, num_samples)
-            chunk_features = []
-            
-            for i in range(start_idx, end_idx):
-                # This is still per-sample, but at least it's done once
-                feats = self._owner._extract_features_from_indexed(
-                    hands[i], discs[i], called[i], gss[i]
-                )
-                # Flatten features
-                parts = [feats[0].reshape(-1)]
-                for j in range(1, 5):
-                    parts.append(feats[j].reshape(-1))
-                parts.append(feats[5].reshape(-1))
-                
-                chunk_features.append(np.concatenate(parts, axis=0))
-            
-            flat_features.extend(chunk_features)
-        
-        # Convert to tensor and move to GPU once
-        features_tensor = torch.from_numpy(
-            np.array(flat_features, dtype=np.float32)
-        ).to(self._owner._device)
-        
-        return features_tensor
-
-    def predict(self, x_list: List[np.ndarray], verbose: int = 0) -> np.ndarray:
-        """Optimized prediction with batching"""
-        hands, discs, called, gss = x_list
-        
-        # Preprocess features once
-        all_features = self._preprocess_all_features(hands, discs, called, gss)
-        
-        # Use DataLoader for efficient batching
-        dataset = TensorDataset(all_features)
-        dataloader = DataLoader(dataset, batch_size=64, shuffle=False)
-        
-        results = []
-        self._owner._net.eval()
-        
-        with torch.no_grad():
-            for (xb,) in dataloader:
-                logits = self._owner._net(xb)
-                probs = torch.softmax(logits, dim=-1)
-                results.append(probs.cpu().numpy())
-        
-        return np.concatenate(results, axis=0)
-
-
-# OPTIMIZATION 5: Even better - precompute features completely outside training
-class PrecomputedDataset(torch.utils.data.Dataset):
-    """Dataset that holds precomputed features to avoid repeated computation"""
-    
-    def __init__(self, features: torch.Tensor, labels: torch.Tensor, weights: Optional[torch.Tensor] = None):
-        self.features = features
-        self.labels = labels
-        self.weights = weights
-    
-    def __len__(self):
-        return len(self.features)
-    
-    def __getitem__(self, idx):
-        if self.weights is not None:
-            return self.features[idx], self.labels[idx], self.weights[idx]
-        return self.features[idx], self.labels[idx]
-
-
-def precompute_features_once(pure_policy_net, hands, discs, called, gss, y_flat, sample_weight=None):
-    """
-    BEST OPTIMIZATION: Compute features once and reuse for all epochs
-    """
-    print("Computing features once for all epochs...")
-    
-    num_samples = hands.shape[0]
-    flat_features = []
-    
-    for i in tqdm(range(num_samples), desc="Feature extraction"):
-        feats = pure_policy_net._extract_features_from_indexed(
-            hands[i], discs[i], called[i], gss[i]
-        )
-        parts = [feats[0].reshape(-1)]
-        for j in range(1, 5):
-            parts.append(feats[j].reshape(-1))
-        parts.append(feats[5].reshape(-1))
-        flat_features.append(np.concatenate(parts, axis=0))
-    
-    # Convert everything to tensors
-    features_tensor = torch.from_numpy(np.array(flat_features, dtype=np.float32))
-    labels_tensor = torch.from_numpy(np.argmax(y_flat, axis=1)).long()
-    
-    weights_tensor = None
-    if sample_weight and 'policy_flat' in sample_weight:
-        weights_tensor = torch.from_numpy(sample_weight['policy_flat']).float()
-    
-    return PrecomputedDataset(features_tensor, labels_tensor, weights_tensor)
-
-
-# Example usage:
-def efficient_training_example(pure_policy_net, hands, discs, called, gss, y_flat):
-    # Method 1: Use optimized wrapper
-    optimized_model = OptimizedKerasLikeWrapper(pure_policy_net)
-    optimized_model.fit([hands, discs, called, gss], {'policy_flat': y_flat}, 
-                       epochs=10, batch_size=32, verbose=1)
-    
-    # Method 2: Even better - precompute once
-    dataset = precompute_features_once(pure_policy_net, hands, discs, called, gss, y_flat)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, pin_memory=True)
-    
-    # Now training is just pure PyTorch - very fast!
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(pure_policy_net._net.parameters(), lr=1e-3)
-    
-    for epoch in range(10):
-        for batch in dataloader:
-            if len(batch) == 3:
-                features, labels, weights = batch
-                features, labels, weights = features.cuda(), labels.cuda(), weights.cuda()
-            else:
-                features, labels = batch
-                features, labels = features.cuda(), labels.cuda()
-            
-            optimizer.zero_grad()
-            logits = pure_policy_net._net(features)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()

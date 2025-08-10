@@ -2,6 +2,25 @@
 
 A simplified Mahjong game implementation with AI players using Monte Carlo Tree Search (MCTS) and neural networks.
 
+## Environment
+
+- Always use the project virtual environment: `.venv312`.
+- All commands in this repository are expected to be run with `.venv312` rather than a system Python.
+- On Windows (Git Bash/PowerShell), prefer invoking tools explicitly via the venv paths:
+
+```bash
+.venv312/Scripts/python --version
+.venv312/Scripts/pip --version
+```
+
+If the environment does not exist yet, create it and install dependencies:
+
+```bash
+python -m venv .venv312
+.venv312/Scripts/python -m pip install -U pip
+.venv312/Scripts/python -m pip install -r requirements.txt
+```
+
 ## Features
 
 - **Simplified Mahjong Rules**: Pinzu and Souzu tiles (1-9), 4 players
@@ -15,10 +34,8 @@ A simplified Mahjong game implementation with AI players using Monte Carlo Tree 
 
 ### Prerequisites
 
-- Python 3.8+
-- Flask
-- NumPy
-- TensorFlow (for PQNetwork)
+Python 3.12
+Pytorch (Use .venv312 or create one if it doesn't exist, this has Pytorch installed)
 
 ### Installation
 
@@ -28,14 +45,14 @@ git clone <repository-url>
 cd mahjong-ai
 ```
 
-2. Install dependencies:
+2. Install dependencies inside `.venv312`:
 ```bash
-pip install -r requirements.txt
+.venv312/Scripts/python -m pip install -r requirements.txt
 ```
 
-3. Run the web application:
+3. Run the web application (using `.venv312`):
 ```bash
-python src/web/app.py
+.venv312/Scripts/python src/web/app.py
 ```
 
 4. Open your browser and navigate to `http://localhost:5000`
@@ -223,8 +240,9 @@ python src/demo_mcts.py
 ### Running Tests
 
 ```bash
-python test/test_pq_network.py
-python test/test_mcts_ai.py
+.venv312/Scripts/python -m pytest -q
+# or run an individual test file
+.venv312/Scripts/python -m pytest -q test/test_pure_policy_dataset.py
 ```
 
 ## Architecture

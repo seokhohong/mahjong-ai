@@ -85,13 +85,7 @@ class PurePolicyPlayer(Player):
     def _select_best_legal(self, gs: GamePerspective, legal_moves: List[Any]) -> Optional[Any]:
         if not legal_moves:
             return None
-        hand_idx, disc_idx, called_idx, game_state = self._encode_inputs(gs)
-        probs = self.network.model.predict([
-            hand_idx[None, :],
-            disc_idx[None, :, :],
-            called_idx[None, :, :, :],
-            game_state[None, :]
-        ], verbose=0)[0]
+        probs = self.predict_policy_probs(gs)
 
         # Determine phase: if last_discard exists and not from self -> reaction phase
         if gs.last_discarded_tile is not None and gs.last_discard_player is not None and gs.last_discard_player != gs.player_id:
@@ -109,13 +103,11 @@ class PurePolicyPlayer(Player):
     # --- Overrides ---
     def play(self, game_state: GamePerspective):
         # Current player's action phase legal moves
-        if self._game is None:
-            return Discard(game_state.player_hand[0])
         legal = self._game.legal_moves(self.player_id)
         chosen = self._select_best_legal(game_state, legal)
         return chosen if chosen is not None else (legal[0] if legal else Discard(game_state.player_hand[0]))
 
-    def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]):
+    def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]) -> Reaction:
         # Build legal moves from options
         legal: List[Any] = []
         if game_state.can_ron():
@@ -133,6 +125,25 @@ class PurePolicyPlayer(Player):
                 return Pon(options['pon'][0])
             if options.get('chi'):
                 return Chi(options['chi'][0])
+            # Must return a Reaction; default to Pass
+            return PassCall()
         return chosen
+
+    # --- Exposed inference path for integration consistency checks ---
+    def predict_policy_probs(self, gs: GamePerspective) -> np.ndarray:
+        """Return flattened action probabilities for the given `GamePerspective`.
+
+        This mirrors the exact encoding pathway used within the player during
+        action selection and is intended for tests that must verify that
+        recorder-based feature serialization is consistent with inference.
+        """
+        hand_idx, disc_idx, called_idx, game_state = self._encode_inputs(gs)
+        probs = self.network.model.predict([
+            hand_idx[None, :],
+            disc_idx[None, :, :],
+            called_idx[None, :, :, :],
+            game_state[None, :]
+        ], verbose=0)[0]
+        return probs
 
 
