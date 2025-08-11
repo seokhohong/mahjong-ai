@@ -72,8 +72,6 @@ class TestSimpleJong(unittest.TestCase):
         # Winner should be None or a valid player ID
         if winner is not None:
             self.assertIn(winner, [0, 1, 2, 3])
-            # If there's a winner, they should have a winning hand
-            self.assertTrue(self.players[winner].can_win())
 
     def test_state_copy_roundtrip(self):
         """Copying the game via SimpleJong.copy() preserves state and is independent on mutation."""

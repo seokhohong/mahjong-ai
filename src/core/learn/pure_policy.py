@@ -44,18 +44,58 @@ class PurePolicyNetwork:
         # Determine action space size once
         from .pure_policy_dataset import get_num_actions  # type: ignore
         self._num_actions = int(get_num_actions())
-        # Build a minimal MLP over flattened features extracted by this class
-        # Feature dimension: (12*5) + (4*max_turns*embedding_dim) + 50
-        self._flat_dim = (12 * 5) + (4 * self.max_turns * self.embedding_dim) + 50
-        self._net = nn.Sequential(
-            nn.Linear(self._flat_dim, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_size // 2, self._num_actions),
-        )
+        # Convolutional feature towers over structured inputs
+        from ..constants import TOTAL_TILES, NUM_PLAYERS, GAME_STATE_VEC_LEN as GSV
+        dealt = 11 * int(NUM_PLAYERS)
+        self._max_discards_per_player = max(1, (int(TOTAL_TILES) - dealt) // int(NUM_PLAYERS))
+        self._max_called_tiles_per_player = 9  # up to 3 melds fully; clamp to 9
+
+        conv_ch1, conv_ch2 = 32, 64
+
+        class _PolicyNet(nn.Module):
+            def __init__(self, outer: 'PurePolicyNetwork') -> None:
+                super().__init__()
+                self.outer = outer
+                # Convs and MLP belong to this module so that .to(device) migrates all weights
+                self.hand_conv = nn.Sequential(
+                    nn.Conv1d(outer.embedding_dim, conv_ch1, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv1d(conv_ch1, conv_ch2, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.AdaptiveMaxPool1d(1),
+                )
+                self.calls_conv = nn.Sequential(
+                    nn.Conv1d(outer.embedding_dim, conv_ch1, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv1d(conv_ch1, conv_ch2, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.AdaptiveMaxPool1d(1),
+                )
+                self.disc_conv = nn.Sequential(
+                    nn.Conv1d(outer.embedding_dim, conv_ch1, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv1d(conv_ch1, conv_ch2, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.AdaptiveMaxPool1d(1),
+                )
+                self.mlp = nn.Sequential(
+                    nn.Linear((conv_ch2 * 3) + GSV, hidden_size),
+                    nn.ReLU(),
+                    nn.Dropout(0.3),
+                    nn.Linear(hidden_size, hidden_size // 2),
+                    nn.ReLU(),
+                    nn.Dropout(0.3),
+                    nn.Linear(hidden_size // 2, self.outer._num_actions),
+                )
+
+            def forward(self, hand_seq: torch.Tensor, calls_seq: torch.Tensor, disc_seq: torch.Tensor, gsv: torch.Tensor) -> torch.Tensor:  # type: ignore[name-defined]
+                h = self.hand_conv(hand_seq).squeeze(-1)
+                c = self.calls_conv(calls_seq).squeeze(-1)
+                d = self.disc_conv(disc_seq).squeeze(-1)
+                x = torch.cat([h, c, d, gsv], dim=1)
+                return self.mlp(x)
+
+        self._net = _PolicyNet(self)
         # Device and eval mode by default
         self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self._net.to(self._device)
@@ -132,12 +172,17 @@ class PurePolicyNetwork:
         vec[4] = total_opponent_sets / float(MAX_CALLED_SETS_ALL_OPPONENTS)
         vec[5] = float(len(getattr(game_state, 'visible_tiles', []))) / float(TOTAL_TILES)
 
-        # Last discard embedding (fixed 4 dims) at positions 6..9
+        # Explicit flags before last-discard embedding (to mirror dataset order)
+        vec[6] = 1.0 if game_state.can_tsumo() else 0.0
+        vec[7] = 1.0 if game_state.can_ron() else 0.0
+
+        # Last discard embedding (fixed 4 dims) follows at positions 8..11
         if game_state.last_discarded_tile is not None:
             emb = self._get_tile_embedding(game_state.last_discarded_tile).astype(np.float32)
         else:
             emb = np.zeros((self.embedding_dim,), dtype=np.float32)
-        vec[6:6 + self.embedding_dim] = emb[: self.embedding_dim]
+        vec[8:8 + self.embedding_dim] = emb[: self.embedding_dim]
+
 
         # Last discard player one-hot relative to viewer at last 4 positions
         if game_state.last_discard_player is not None:
@@ -159,17 +204,17 @@ class PurePolicyNetwork:
         return [hand_features] + discard_features + [game_state_features]
 
     def evaluate(self, game_state: GamePerspective) -> Dict[str, np.ndarray]:
-        features = self._extract_features(game_state)
-        # Flatten to match MLP input
-        parts: List[np.ndarray] = [features[0].reshape(-1)]
-        for i in range(1, 5):
-            parts.append(features[i].reshape(-1))
-        parts.append(features[5].reshape(-1))
-        x = np.concatenate(parts, axis=0)[None, :].astype(np.float32)
-        with torch.no_grad():
-            logits = self._net(torch.from_numpy(x).to(self._device))
-            probs = F.softmax(logits, dim=-1).numpy()
-        return {'policy': probs[0]}
+        # Reuse predict path to ensure identical preprocessing
+        from .pure_policy_dataset import serialize_state, extract_indexed_state  # type: ignore
+        sd = serialize_state(game_state)
+        idx = extract_indexed_state(sd)
+        probs = self.model.predict([
+            idx['hand_idx'][None, :],
+            idx['disc_idx'][None, :, :],
+            idx.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32))[None, :, :, :],
+            idx['game_state'][None, :],
+        ], verbose=0)[0]
+        return {'policy': probs}
 
     def _extract_features_from_indexed(self, hand_idx: np.ndarray, disc_idx: np.ndarray, called_idx: np.ndarray, game_state_vec: np.ndarray) -> List[np.ndarray]:
         """Vectorized single-sample path using precomputed embedding table."""
@@ -202,15 +247,106 @@ class PurePolicyNetwork:
         return [hand_tensor] + [disc_emb[i] for i in range(min(4, disc_emb.shape[0]))] + [gs]
 
     def save_model(self, filepath: str) -> None:
+        """Persist a self-describing checkpoint containing hyperparams and weights.
+
+        Stores:
+          - init kwargs (hidden_size, embedding_dim, max_turns)
+          - network state_dict
+          - embedding table
+        """
         if not filepath.endswith('.pt'):
             filepath += '.pt'
-        torch.save(self._net.state_dict(), filepath)
+        payload = {
+            'format': 'pure_policy_full_v1',
+            'init': {
+                'hidden_size': int(self.hidden_size),
+                'embedding_dim': int(self.embedding_dim),
+                'max_turns': int(self.max_turns),
+            },
+            'state_dict': self._net.state_dict(),
+            'embedding_table': self._embedding_table,
+        }
+        torch.save(payload, filepath)
 
     def load_model(self, filepath: str) -> None:
+        """Load model from file, supporting both full-object and state_dict checkpoints.
+
+        - If the checkpoint is a PurePolicyNetwork instance, copy its fields into self
+          so existing references (e.g., in players) remain valid.
+        - If it's a state_dict, attempt to load into the current network; fall back to
+          strict=False for partial compatibility.
+        """
         if not filepath.endswith('.pt'):
             filepath += '.pt'
-        state = torch.load(filepath, map_location='cpu')
-        self._net.load_state_dict(state)
+        ckpt = torch.load(filepath, map_location='cpu')
+        # Self-describing payload
+        if isinstance(ckpt, dict) and ckpt.get('format') == 'pure_policy_full_v1':
+            init = ckpt.get('init', {})
+            state_dict = ckpt.get('state_dict', {})
+            emb_table = ckpt.get('embedding_table')
+            # Rebuild a fresh network with saved hyperparams
+            rebuilt = PurePolicyNetwork(
+                hidden_size=int(init.get('hidden_size', self.hidden_size)),
+                embedding_dim=int(init.get('embedding_dim', self.embedding_dim)),
+                max_turns=int(init.get('max_turns', self.max_turns)),
+            )
+            try:
+                rebuilt._net.load_state_dict(state_dict)
+            except Exception:
+                rebuilt._net.load_state_dict(state_dict, strict=False)
+            if emb_table is not None:
+                rebuilt._embedding_table = np.asarray(emb_table, dtype=np.float32)
+            # Copy rebuilt internals into self
+            self.hidden_size = rebuilt.hidden_size
+            self.embedding_dim = rebuilt.embedding_dim
+            self.max_turns = rebuilt.max_turns
+            self._num_actions = rebuilt._num_actions
+            self._net = rebuilt._net
+            self._embedding_table = rebuilt._embedding_table
+            self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self._net.to(self._device)
+            self._net.eval()
+            return
+        # Legacy state_dict checkpoint (no hyperparams)
+        if isinstance(ckpt, dict):
+            try:
+                self._net.load_state_dict(ckpt)
+            except Exception:
+                self._net.load_state_dict(ckpt, strict=False)
+            return
+        raise ValueError(f"Unsupported checkpoint format in {filepath}: {type(ckpt)}")
+
+    @staticmethod
+    def load_from_file(filepath: str) -> 'PurePolicyNetwork':
+        """Load and return a PurePolicyNetwork instance from file."""
+        if not filepath.endswith('.pt'):
+            filepath += '.pt'
+        obj = torch.load(filepath, map_location='cpu')
+        if isinstance(obj, dict) and obj.get('format') == 'pure_policy_full_v1':
+            init = obj.get('init', {})
+            inst = PurePolicyNetwork(
+                hidden_size=int(init.get('hidden_size', 128)),
+                embedding_dim=int(init.get('embedding_dim', 4)),
+                max_turns=int(init.get('max_turns', MAX_TURNS)),
+            )
+            try:
+                inst._net.load_state_dict(obj.get('state_dict', {}))
+            except Exception:
+                inst._net.load_state_dict(obj.get('state_dict', {}), strict=False)
+            if obj.get('embedding_table') is not None:
+                inst._embedding_table = np.asarray(obj.get('embedding_table'), dtype=np.float32)
+            inst._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            inst._net.to(inst._device)
+            inst._net.eval()
+            return inst
+        # Legacy: state_dict only
+        inst = PurePolicyNetwork()
+        try:
+            inst._net.load_state_dict(obj)  # type: ignore[arg-type]
+        except Exception:
+            inst._net.load_state_dict(obj, strict=False)  # type: ignore[arg-type]
+        inst._net.eval()
+        return inst
 
     # --- PyTorch interop helpers ---
     def to(self, device: torch.device) -> 'PurePolicyNetwork':
@@ -236,38 +372,23 @@ class _KerasLikeWrapper:
     def __init__(self, owner: PurePolicyNetwork):
         self._owner = owner
 
-    def _precompute_flat(self, hands: np.ndarray, discs: np.ndarray, called: np.ndarray, gss: np.ndarray) -> np.ndarray:
-        """Vectorized precompute of flattened features for an entire batch."""
-        # Hands: (N, 12) -> embeddings (N,12,embed), called flag (N,12,1)
+    def _precompute_cnn(self, hands: np.ndarray, discs: np.ndarray, called: np.ndarray, gss: np.ndarray):
+        """Vectorized precompute of CNN inputs from indexed features.
+
+        Returns:
+          - hand_seq: (N, embed, 12)
+          - calls_seq: (N, embed, 36)  # 4 players * 9 called tiles
+          - disc_seq: (N, embed, 4*K)  # concatenated discards per player
+          - gsv: (N, GSV)
+        """
         hands = np.asarray(hands, dtype=np.int32)
-        hand_emb = self._owner._embedding_table[np.clip(hands, 0, 18)]  # (N,12,embed)
-        # Called flags: build presence per sample from called sets (N,4,sets,3)
-        called = np.asarray(called, dtype=np.int32)
-        if called.ndim == 4:
-            # Only row 0 (current player perspective) is used for flags
-            cs0 = called[:, 0, :, :]  # (N, sets, 3)
-            # Convert to presence [N,19]
-            codes = np.arange(19, dtype=np.int32)
-            presence = (cs0[..., None] == codes[None, None, None, :]).any(axis=(1, 2))  # (N,19)
-            called_flag = presence[np.arange(hands.shape[0])[:, None], np.clip(hands, 0, 18)] & (hands > 0)
-        else:
-            called_flag = np.zeros(hands.shape, dtype=bool)
-        hand_feat = np.concatenate([hand_emb, called_flag.astype(np.float32)[..., None]], axis=-1)  # (N,12,5)
-
-        # Discards: (N,4,maxT) -> embeddings (N,4,maxT,embed)
         discs = np.asarray(discs, dtype=np.int32)
-        disc_emb = self._owner._embedding_table[np.clip(discs, 0, 18)]  # (N,4,maxT_in,embed)
-        # Conform time dimension to network's max_turns via slice/pad
-        maxT = self._owner.max_turns
-        curT = disc_emb.shape[2] if disc_emb.ndim >= 3 else 0
-        if curT > maxT:
-            disc_emb = disc_emb[:, :, :maxT, :]
-        elif curT < maxT:
-            pad_amt = maxT - curT
-            pad = np.zeros((disc_emb.shape[0], disc_emb.shape[1], pad_amt, disc_emb.shape[3]), dtype=np.float32)
-            disc_emb = np.concatenate([disc_emb, pad], axis=2)
+        from ..constants import NUM_PLAYERS, MAX_CALLED_SETS_PER_PLAYER, MAX_TILES_PER_CALLED_SET
+        if called is None:
+            called = np.zeros((hands.shape[0], int(NUM_PLAYERS), int(MAX_CALLED_SETS_PER_PLAYER), int(MAX_TILES_PER_CALLED_SET)), dtype=np.int32)
+        else:
+            called = np.asarray(called, dtype=np.int32)
 
-        # Game state: (N,GSV)
         from ..constants import GAME_STATE_VEC_LEN as GSV
         gss = np.asarray(gss, dtype=np.float32)
         if gss.ndim == 1:
@@ -278,25 +399,36 @@ class _KerasLikeWrapper:
         elif gss.shape[1] > GSV:
             gss = gss[:, :GSV]
 
-        # Flatten to single vector per sample
-        N = hands.shape[0]
-        from ..constants import GAME_STATE_VEC_LEN as GSV
-        flat_dim = (12 * 5) + (4 * self._owner.max_turns * self._owner.embedding_dim) + GSV
-        flat = np.empty((N, flat_dim), dtype=np.float32)
-        # Hand
-        flat[:, 0:12*5] = hand_feat.reshape(N, 12 * 5)
-        # Discards per player
-        offset = 12 * 5
-        for i in range(4):
-            start = offset + i * (self._owner.max_turns * self._owner.embedding_dim)
-            end = start + (self._owner.max_turns * self._owner.embedding_dim)
-            if i < disc_emb.shape[1]:
-                flat[:, start:end] = disc_emb[:, i, :, :].reshape(N, -1)
-            else:
-                flat[:, start:end] = 0.0
-        # Game state
-        flat[:, -GSV:] = gss[:, :GSV]
-        return flat
+        # --- Hand sequence: sort non-zero ascending, zeros to end ---
+        hand_vals = np.where(hands > 0, hands, 999)
+        hand_sorted = np.sort(hand_vals, axis=1)
+        hand_sorted = np.where(hand_sorted == 999, 0, hand_sorted)
+        hand_seq = self._owner._embedding_table[np.clip(hand_sorted, 0, 18)]  # (N,12,embed)
+        hand_seq = np.transpose(hand_seq, (0, 2, 1))  # (N,embed,12)
+
+        # --- Calls per player: flatten (4,3) per set -> 12, push zeros to end preserving order, take first 9 ---
+        called_flat = called.reshape(called.shape[0], int(NUM_PLAYERS), -1)  # (N,4, 4*3)
+        zero_first = (called_flat == 0).astype(np.int32)
+        order = np.argsort(zero_first, axis=2, kind='stable')  # non-zero (0) before zero (1)
+        called_reordered = np.take_along_axis(called_flat, order, axis=2)
+        called_top9 = called_reordered[:, :, :self._owner._max_called_tiles_per_player]  # (N,players,9)
+        calls_emb = self._owner._embedding_table[np.clip(called_top9, 0, 18)]  # (N,4,9,embed)
+        calls_seq = calls_emb.reshape(calls_emb.shape[0], -1, calls_emb.shape[-1])  # (N,36,embed)
+        calls_seq = np.transpose(calls_seq, (0, 2, 1))  # (N,embed,36)
+
+        # --- Discards per player: truncate/pad to K then concat players ---
+        K = self._owner._max_discards_per_player
+        maxT = discs.shape[2] if discs.ndim >= 3 else 0
+        if maxT >= K:
+            disc_slice = discs[:, :, :K]
+        else:
+            pad = np.zeros((discs.shape[0], discs.shape[1], K - maxT), dtype=np.int32)
+            disc_slice = np.concatenate([discs, pad], axis=2)
+        disc_emb = self._owner._embedding_table[np.clip(disc_slice, 0, 18)]  # (N,4,K,embed)
+        disc_seq = disc_emb.reshape(disc_emb.shape[0], -1, disc_emb.shape[-1])  # (N,4*K,embed)
+        disc_seq = np.transpose(disc_seq, (0, 2, 1))  # (N,embed,4*K)
+
+        return hand_seq.astype(np.float32), calls_seq.astype(np.float32), disc_seq.astype(np.float32), gss.astype(np.float32)
 
     def fit(
         self,
@@ -326,8 +458,8 @@ class _KerasLikeWrapper:
         if y_flat is None:
             return self
 
-        # Precompute flattened features and labels
-        xb_np = self._precompute_flat(hands, discs, called, gss)
+        # Precompute CNN tensors and labels
+        hand_seq_np, calls_seq_np, disc_seq_np, gsv_np = self._precompute_cnn(hands, discs, called, gss)
         labels_np = np.argmax(y_flat, axis=1).astype(np.int64)
         
         # Require rewards for policy-gradient training
@@ -340,12 +472,15 @@ class _KerasLikeWrapper:
         original_rewards = sample_weight.astype(np.float32)
         
         device = self._owner._device
-        xb = torch.from_numpy(xb_np).to(device)
+        hand_seq = torch.from_numpy(hand_seq_np).to(device)
+        calls_seq = torch.from_numpy(calls_seq_np).to(device)
+        disc_seq = torch.from_numpy(disc_seq_np).to(device)
+        gsv_t = torch.from_numpy(gsv_np).to(device)
         yb_all = torch.from_numpy(labels_np).to(device)
         # Legality masks (required)
         try:
             lm_all = torch.from_numpy(legality_masks.astype(bool)).to(device)
-            if lm_all.ndim != 2 or lm_all.shape[0] != xb.shape[0] or lm_all.shape[1] != self._owner._num_actions:
+            if lm_all.ndim != 2 or lm_all.shape[0] != hand_seq.shape[0] or lm_all.shape[1] != self._owner._num_actions:
                 raise ValueError("legality_masks must have shape (N, num_actions)")
             # Assert every sample has at least one legal action
             per_row_any = lm_all.any(dim=1)
@@ -402,7 +537,7 @@ class _KerasLikeWrapper:
 
         from tqdm import tqdm  # type: ignore
 
-        num_samples = xb.shape[0]
+        num_samples = hand_seq.shape[0]
         bs = max(1, min(batch_size, num_samples))
 
         # Tracking metrics
@@ -414,14 +549,13 @@ class _KerasLikeWrapper:
         }
 
         # Precompute validation features/labels/weights if provided
-        val_flat: Optional[np.ndarray] = None
         val_labels: Optional[np.ndarray] = None
         val_weights: Optional[np.ndarray] = None
         if val_x_list is not None and val_targets is not None:
             vh, vd, vc, vg = val_x_list
             vy_flat = val_targets.get('policy_flat') if isinstance(val_targets, dict) else None
             if vy_flat is not None:
-                val_flat = self._precompute_flat(vh, vd, vc, vg)
+                # we re-precompute CNN tensors later during validation step
                 val_labels = np.argmax(vy_flat, axis=1).astype(np.int64)
                 if val_sample_weight is not None:
                     val_weights = val_sample_weight.astype(np.float32)
@@ -456,7 +590,7 @@ class _KerasLikeWrapper:
             for start in range(0, num_samples, bs):
                 end = min(num_samples, start + bs)
                 idx = indices[start:end]
-                xb_b = xb.index_select(0, idx)
+                # slices prepared below for each input tensor
                 yb = yb_all.index_select(0, idx)
                 
                 # Use RAW rewards for training (policy gradient)
@@ -466,7 +600,12 @@ class _KerasLikeWrapper:
                 optimizer.zero_grad(set_to_none=True)
                 
                 # Forward pass
-                logits = self._owner._net(xb_b)
+                logits = self._owner._net(
+                    hand_seq.index_select(0, idx),
+                    calls_seq.index_select(0, idx),
+                    disc_seq.index_select(0, idx),
+                    gsv_t.index_select(0, idx),
+                )
                 # Apply legality mask to logits
                 lm = lm_all.index_select(0, idx)
                 logits = logits.masked_fill(~lm, -1e9)
@@ -567,9 +706,9 @@ class _KerasLikeWrapper:
                 train_pg = pg_sum / total_samples
                 print(f"\nEpoch {ep+1}/{epochs} Summary:")
                 print(f"  Loss: {epoch_loss:.4f} | Entropy: {epoch_entropy:.4f}")
-                print(f"  Train -> CE: {train_ce:.4f} | PG: {train_pg:.4f}")
-                print(f"  Sample Counts -> Win: {win_count} | Lose: {lose_count} | Neutral: {neutral_count}")
-                print(f"  Policy Probs -> Win: {avg_win_prob:.4f} | Lose: {avg_lose_prob:.4f} | Neutral: {avg_neutral_prob:.4f}")
+                print(f"  [TRAIN] CE: {train_ce:.4f} | PG: {train_pg:.4f}")
+                print(f"  [TRAIN] Sample Counts -> Win: {win_count} | Lose: {lose_count} | Neutral: {neutral_count}")
+                print(f"  [TRAIN] Policy Probs -> Win: {avg_win_prob:.4f} | Lose: {avg_lose_prob:.4f} | Neutral: {avg_neutral_prob:.4f}")
                 # Top-10 actions by average probability over winning samples
                 if win_samples > 0:
                     avg_action_probs_win = (win_action_prob_sum / max(1, int(win_samples))).astype(np.float64)
@@ -610,7 +749,7 @@ class _KerasLikeWrapper:
                                 return label
                         return label
 
-                    print("  Train (wins) top actions:")
+                    print("  [TRAIN] (wins) top actions:")
                     for rank_i, ai in enumerate(top_idx, 1):
                         print(f"    {rank_i}. {_pretty(labels[ai])}: {avg_action_probs_win[ai]:.4f}")
                     # Also report ron and tsumo average probabilities over wins
@@ -619,20 +758,27 @@ class _KerasLikeWrapper:
                         tsumo_idx = labels.index('tsumo')
                     except ValueError:
                         ron_idx, tsumo_idx = 1, 2  # Fallback to standard indices
-                    print(f"  Train (wins) ron: {avg_action_probs_win[ron_idx]:.4f} | tsumo: {avg_action_probs_win[tsumo_idx]:.4f}")
+                    print(f"  [TRAIN] (wins) ron: {avg_action_probs_win[ron_idx]:.4f} | tsumo: {avg_action_probs_win[tsumo_idx]:.4f}")
                 
                 if avg_win_prob > 0 and avg_lose_prob > 0:
                     ratio = avg_win_prob / avg_lose_prob
-                    print(f"  Win/Lose Ratio: {ratio:.2f}x | Performance: {performance:.4f}")
+                    print(f"  [TRAIN] Win/Lose Ratio: {ratio:.2f}x | Performance: {performance:.4f}")
                 elif avg_lose_prob == 0:
-                    print(f"  WARNING: No lose samples found in this epoch! Check data distribution.")
+                    print(f"  [TRAIN] WARNING: No lose samples found in this epoch! Check data distribution.")
                 
                 print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
 
                 # Validation metrics per epoch if provided
-                if val_flat is not None and val_labels is not None:
+                if val_labels is not None:
                     with torch.no_grad():
-                        logits_val = self._owner._net(torch.from_numpy(val_flat).to(device))
+                        vh, vd, vc, vg = val_x_list
+                        h_np, c_np, d_np, g_np = self._precompute_cnn(vh, vd, vc, vg)
+                        logits_val = self._owner._net(
+                            torch.from_numpy(h_np).to(device),
+                            torch.from_numpy(c_np).to(device),
+                            torch.from_numpy(d_np).to(device),
+                            torch.from_numpy(g_np).to(device),
+                        )
                         # Apply validation legality mask if provided
                         if val_legality_masks is not None:
                             try:
@@ -671,13 +817,13 @@ class _KerasLikeWrapper:
                     ho_neutral_count = int(np.sum(neutral_mask_val))
                     ho_performance = ho_win_prob - ho_lose_prob
                     # Print holdout metrics aligned with train
-                    print(f"  Holdout -> CE: {ce_val:.4f} | PG: {pg_val:.4f}")
-                    print(f"            Sample Counts -> Win: {ho_win_count} | Lose: {ho_lose_count} | Neutral: {ho_neutral_count}")
-                    print(f"            Policy Probs -> Win: {ho_win_prob:.4f} | Lose: {ho_lose_prob:.4f} | Neutral: {ho_neutral_prob:.4f}")
+                    print(f"  [HOLDOUT] CE: {ce_val:.4f} | PG: {pg_val:.4f}")
+                    print(f"  [HOLDOUT] Sample Counts -> Win: {ho_win_count} | Lose: {ho_lose_count} | Neutral: {ho_neutral_count}")
+                    print(f"  [HOLDOUT] Policy Probs -> Win: {ho_win_prob:.4f} | Lose: {ho_lose_prob:.4f} | Neutral: {ho_neutral_prob:.4f}")
                     if ho_win_prob > 0 and ho_lose_prob > 0:
-                        print(f"            Win/Lose Ratio: {ho_win_prob/ho_lose_prob:.2f}x | Performance: {ho_performance:.4f}")
+                        print(f"  [HOLDOUT] Win/Lose Ratio: {ho_win_prob/ho_lose_prob:.2f}x | Performance: {ho_performance:.4f}")
                     elif ho_lose_prob == 0:
-                        print(f"            WARNING: No lose samples found in HOLDOUT! Check data distribution.")
+                        print(f"  [HOLDOUT] WARNING: No lose samples found in HOLDOUT! Check data distribution.")
             
             # Early stopping based on performance metric (avg_win_prob - avg_lose_prob)
             if performance > best_metric:
@@ -710,9 +856,14 @@ class _KerasLikeWrapper:
 
     def predict(self, x_list: List[np.ndarray], verbose: int = 0) -> np.ndarray:
         hands, discs, called, gss = x_list
-        xb_np = self._precompute_flat(hands, discs, called, gss)
+        hand_seq_np, calls_seq_np, disc_seq_np, gsv_np = self._precompute_cnn(hands, discs, called, gss)
         with torch.no_grad():
-            logits = self._owner._net(torch.from_numpy(xb_np).to(self._owner._device))
+            logits = self._owner._net(
+                torch.from_numpy(hand_seq_np).to(self._owner._device),
+                torch.from_numpy(calls_seq_np).to(self._owner._device),
+                torch.from_numpy(disc_seq_np).to(self._owner._device),
+                torch.from_numpy(gsv_np).to(self._owner._device),
+            )
             probs = F.softmax(logits, dim=-1).cpu().numpy()
         return probs
 

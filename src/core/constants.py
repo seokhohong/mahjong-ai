@@ -17,6 +17,8 @@ TOTAL_TILES: int = NUM_SUITS * NUM_RANKS * TILE_COPIES_DEFAULT  # 72
 MAX_HAND_TILES: int = 14
 MAX_CALLED_SETS_PER_PLAYER: int = 4
 MAX_CALLED_SETS_ALL_OPPONENTS: int = (NUM_PLAYERS - 1) * MAX_CALLED_SETS_PER_PLAYER  # 12
+# Number of tiles that define a called set (pon/chi)
+MAX_TILES_PER_CALLED_SET: int = 3
 
 # Encodings
 EMBEDDING_DIM: int = 4
@@ -26,6 +28,8 @@ EMBEDDING_DIM: int = 4
 # We cap the per-player discard/turn sequence vector length as 4 * remaining_draws for headroom.
 REMAINING_AFTER_DEAL: int = max(0, TOTAL_TILES - (11 * NUM_PLAYERS))
 MAX_TURNS: int = 4 * REMAINING_AFTER_DEAL
+# Maximum number of discards we will track per player for learning inputs
+MAX_DISCARDS_PER_PLAYER: int = max(1, REMAINING_AFTER_DEAL // NUM_PLAYERS)
 GAME_STATE_VEC_LEN: int = 50
 
 

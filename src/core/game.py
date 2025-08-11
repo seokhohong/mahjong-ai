@@ -195,6 +195,7 @@ class GamePerspective:
         newly_drawn_tile: Optional[Tile] = None,
         visible_tiles: Optional[List[str]] = None,
         player_discards: Optional[Dict[int, List[str]]] = None,
+        is_current_turn: bool = False,
     ) -> None:
         self.player_hand = list(player_hand)
         if len(self.player_hand) == 0:
@@ -208,6 +209,7 @@ class GamePerspective:
         self.can_call = bool(can_call)
         self.state = state
         self.newly_drawn_tile = newly_drawn_tile
+        self.is_current_turn = bool(is_current_turn)
         # Optional fields used by other components; keep for compatibility
         self.player_discards: Dict[int, List[str]] = dict(player_discards) if player_discards is not None else {}
         self.visible_tiles: List[str] = list(visible_tiles) if visible_tiles is not None else []
@@ -244,6 +246,146 @@ class GamePerspective:
         tiles = list(self.player_hand) + [self.last_discarded_tile]
         return _can_form_melds(tiles, remaining_melds)
 
+    # --- Limited-information helpers moved from engine ---
+    def get_call_options(self) -> Dict[str, List[List[Tile]]]:
+        """Compute legal call options (pon/chi) for this reacting player.
+
+        Returns a dict: {'pon': List[List[Tile]], 'chi': List[List[Tile]]}
+        where each inner list contains the two tiles from the player's hand
+        required to complete the call.
+        """
+        options: Dict[str, List[List[Tile]]] = {'pon': [], 'chi': []}
+        last = self.last_discarded_tile
+        last_from = self.last_discard_player
+        if last is None or last_from is None:
+            return options
+        # Cannot react to own discard
+        if last_from == self.player_id:
+            return options
+
+        # Build count/lookup over the player's hand
+        hand = list(self.player_hand)
+
+        # Pon: need two identical tiles to last
+        same = [t for t in hand if t.suit == last.suit and t.tile_type == last.tile_type]
+        if len(same) >= 2:
+            options['pon'].append([same[0], same[1]])
+
+        # Chi: only the left player relative to discarder, suited tiles only
+        left_player = (last_from + 1) % 4
+        if self.player_id == left_player and last.suit in (Suit.PINZU, Suit.SOUZU):
+            v = last.tile_type.value
+            s = last.suit
+            def has_tile(val: int) -> Optional[Tile]:
+                for t in hand:
+                    if t.suit == s and t.tile_type.value == val:
+                        return t
+                return None
+            # (v-2, v-1)
+            if v - 2 >= 1 and v - 1 >= 1:
+                a = has_tile(v - 2)
+                b = has_tile(v - 1)
+                if a and b:
+                    options['chi'].append([a, b])
+            # (v-1, v+1)
+            if v - 1 >= 1 and v + 1 <= 9:
+                a = has_tile(v - 1)
+                b = has_tile(v + 1)
+                if a and b:
+                    options['chi'].append([a, b])
+            # (v+1, v+2)
+            if v + 1 <= 9 and v + 2 <= 9:
+                a = has_tile(v + 1)
+                b = has_tile(v + 2)
+                if a and b:
+                    options['chi'].append([a, b])
+
+        return options
+
+    def is_legal(self, move: Union['Action', 'Reaction']) -> bool:
+        """Check legality of a move from this player's limited perspective."""
+        # Action phase: only when it's this player's turn (state is Action)
+        if isinstance(move, (Tsumo, Discard)):
+            if self.state is not Action or not self.is_current_turn:
+                return False
+            if isinstance(move, Tsumo):
+                return self.can_tsumo()
+            if isinstance(move, Discard):
+                return move.tile in self.player_hand
+            return False
+
+        # Reaction phase: must be reacting to someone else's discard
+        if self.state is not Reaction:
+            return False
+        if self.last_discarded_tile is None or self.last_discard_player is None:
+            return False
+        if self.last_discard_player == self.player_id:
+            return False
+
+        if isinstance(move, Ron):
+            return self.can_ron()
+        if isinstance(move, PassCall):
+            if self.can_ron():
+                return True
+            opts = self.get_call_options()
+            return bool(opts.get('pon')) or bool(opts.get('chi'))
+        if isinstance(move, Pon):
+            opts = self.get_call_options()
+            legal_sets = opts.get('pon', [])
+            def key(ts: List[Tile]):
+                return sorted([(t.suit.value, t.tile_type.value) for t in ts])
+            return any(key(move.tiles) == key(s) for s in legal_sets)
+        if isinstance(move, Chi):
+            opts = self.get_call_options()
+            legal_sets = opts.get('chi', [])
+            def key(ts: List[Tile]):
+                return sorted([(t.suit.value, t.tile_type.value) for t in ts])
+            return any(key(move.tiles) == key(s) for s in legal_sets)
+        return False
+
+    def legal_moves(self) -> List[Union['Action', 'Reaction']]:
+        """Enumerate all legal moves for this player from their perspective."""
+        moves: List[Union[Action, Reaction]] = []
+
+        # Reaction phase: react to the outstanding discard
+        if self.state is Reaction and self.last_discarded_tile is not None and self.last_discard_player is not None:
+            if self.player_id == self.last_discard_player:
+                return []
+            has_any = False
+            if self.can_ron():
+                moves.append(Ron())
+                has_any = True
+            else:
+                opts = self.get_call_options()
+                for tiles in opts.get('pon', []):
+                    moves.append(Pon(tiles))
+                for tiles in opts.get('chi', []):
+                    moves.append(Chi(tiles))
+                has_any = bool(moves)
+            if has_any:
+                moves.insert(0, PassCall())
+            return moves
+
+        # Action phase: player's turn
+        if self.state is Action and self.is_current_turn:
+            if self.can_tsumo():
+                moves.append(Tsumo())
+            for t in list(self.player_hand):
+                moves.append(Discard(t))
+        return moves
+
+    def legality_mask(self) -> 'np.ndarray':
+        """Return a boolean mask over the flattened action space for this perspective."""
+        from src.core.learn.pure_policy_dataset import get_num_actions, serialize_action, encode_action_flat_index  # type: ignore
+        n = int(get_num_actions())
+        mask = np.zeros((n,), dtype=bool)
+        ldt = str(self.last_discarded_tile) if self.last_discarded_tile is not None else None
+        for m in self.legal_moves():
+            ad = serialize_action(m)
+            idx = encode_action_flat_index(ad, ldt)
+            mask[int(idx)] = True
+        return mask
+
 
 # Backward-compatibility alias for older API/tests
 GameState = GamePerspective
@@ -254,17 +396,12 @@ class Player:
     # should remain stateless
     def __init__(self, player_id: int):
         self.player_id = player_id
-        # Back-reference to owning game; set by SimpleJong when players are attached
-        self._game: Optional['SimpleJong'] = None
     
     def play(self, game_state: GamePerspective) -> Action:
         """
         Player's turn - returns an Action (Tsumo, Ron, or Discard)
         First checks if the player can win with the current hand
         """
-        # Decision is stateless: use game_state contents
-        if not game_state.player_hand:
-            return Tsumo()
         
         # Check if we can win with current hand (Tsumo)
         if game_state.can_tsumo():
@@ -278,32 +415,6 @@ class Player:
         
         # If we can't win, discard the most isolated tile (fewest neighbors within ±2 in same suit)
         return Discard(self.choose_isolated_discard_state(game_state))
-
-    def can_win(self) -> bool:
-        """Simplified: return True if our current hand can form 4 melds either by tsumo
-        (12 tiles in hand) or by ron using the last discarded tile.
-
-        This is provided to satisfy simple tests; broader integrations use GamePerspective methods.
-        """
-        if self._game is None:
-            return False
-        # If game is over and we are recorded as a winner, honor that outcome
-        try:
-            if getattr(self._game, 'game_over', False) and hasattr(self._game, 'winners'):
-                if self.player_id in self._game.winners:
-                    return True
-        except Exception:
-            pass
-        hand = self._game._player_hands.get(self.player_id, [])
-        # Tsumo check: already holding 12 tiles
-        if len(hand) == 12 and _can_form_four_melds(hand):
-            return True
-        # Ron check: use last discarded tile if not ours
-        last_tile = self._game.last_discarded_tile
-        last_player = self._game.last_discard_player
-        if last_tile is not None and last_player != self.player_id and len(hand) == 11:
-            return _can_form_four_melds(list(hand) + [last_tile])
-        return False
 
     def choose_isolated_discard_state(self, game_state: GamePerspective) -> Tile:
         hand = game_state.player_hand
@@ -353,7 +464,7 @@ class Player:
 class SimpleJong:
     """Simplified Mahjong game with Pinzu and Souzu tiles"""
     NUM_PLAYERS = 4
-    def __init__(self, players: List[Player], tile_copies: int = 4):
+    def __init__(self, players: List[Player], tile_copies: int = 6):
         if len(players) != SimpleJong.NUM_PLAYERS:
             raise ValueError("SimpleJong requires exactly 4 players")
         
@@ -393,13 +504,6 @@ class SimpleJong:
                 if self.tiles:
                     tile = self.tiles.pop()
                     self._player_hands[i].append(tile)
-
-        # Attach back-references
-        for i, p in enumerate(self.players):
-            try:
-                p._game = self  # type: ignore[attr-defined]
-            except Exception:
-                pass
 
     # Event emission removed for simplification during refactor
     
@@ -441,6 +545,9 @@ class SimpleJong:
             state = Reaction if (self.last_discarded_tile is not None and self.last_discard_player != player_id) else Action
             newly_drawn = None
 
+        # It's only your actionable turn when you're the current player AND there is no outstanding discard
+        is_current_turn = (self.current_player_idx == player_id) and (self.last_discarded_tile is None or self.last_discard_player is None)
+
         gs = GamePerspective(
             player_hand=self._player_hands[player_id].copy(),
             remaining_tiles=len(self.tiles),
@@ -452,6 +559,7 @@ class SimpleJong:
             can_call=self.last_discarded_tile is not None and self.last_discard_player != player_id,
             state=state,
             newly_drawn_tile=newly_drawn,
+            is_current_turn=is_current_turn,
         )
         gs.player_discards = {i: [str(t) for t in self.player_discards[i]] for i in range(4)}  # type: ignore[attr-defined]
 
@@ -566,116 +674,23 @@ class SimpleJong:
         pass
 
     def is_legal(self, actor_id: int, move: Union[Action, Reaction]) -> bool:
-        """Return True if the given move by actor_id is legal in the current state."""
+        """Wrapper: delegate legality to the player's GamePerspective."""
         if self.game_over:
             return False
-        # Action legality
-        if isinstance(move, (Tsumo, Discard)):
-            if actor_id != self.current_player_idx:
-                return False
-            gs = self.get_game_perspective(actor_id)
-            if isinstance(move, Tsumo):
-                return gs.can_tsumo()
-            if isinstance(move, Discard):
-                return move.tile in self._player_hands[actor_id]
-            return False
-
-        # Reaction legality
-        if self.last_discarded_tile is None or self.last_discard_player is None:
-            return False
-        if actor_id == self.last_discard_player:
-            return False
-        rs = self.get_game_perspective(actor_id)
-        # Allow Ron when available
-        if isinstance(move, Ron):
-            return rs.can_ron()
-        # Pass is only legal if some other reaction (Ron/Pon/Chi) is legal
-        if isinstance(move, PassCall):
-            if rs.can_ron():
-                return True
-            opts = self.get_call_options(rs)
-            return bool(opts.get('pon')) or bool(opts.get('chi'))
-        if isinstance(move, Pon):
-            opts = self.get_call_options(rs)
-            legal_sets = opts.get('pon', [])
-            def key(ts: List[Tile]):
-                return sorted([(t.suit.value, t.tile_type.value) for t in ts])
-            return any(key(move.tiles) == key(s) for s in legal_sets)
-        if isinstance(move, Chi):
-            opts = self.get_call_options(rs)
-            legal_sets = opts.get('chi', [])
-            def key(ts: List[Tile]):
-                return sorted([(t.suit.value, t.tile_type.value) for t in ts])
-            return any(key(move.tiles) == key(s) for s in legal_sets)
-        return False
+        gs = self.get_game_perspective(actor_id)
+        return gs.is_legal(move)
 
     def legal_moves(self, actor_id: int) -> List[Union[Action, Reaction]]:
-        """Enumerate all legal moves for the given actor in the current state.
-
-        Exactly one category is produced depending on the game phase:
-        - Action phase (no outstanding discard): only current player may act.
-          Returns some subset of {Tsumo, Discard(tile) for each tile in hand}.
-        - Reaction phase (there is an outstanding discard): only non-discarders may react.
-          Returns subset of {Ron, Pon(two tiles), Chi(two tiles)} based on call options.
-        """
+        """Wrapper: delegate legal move enumeration to the player's GamePerspective."""
         if self.game_over:
             return []
-
-        moves: List[Union[Action, Reaction]] = []
-
-        # If there is an outstanding discard, we are in reaction phase
-        if self.last_discarded_tile is not None and self.last_discard_player is not None:
-            # Discarder cannot react to their own tile
-            if actor_id == self.last_discard_player:
-                return []
-            rs = self.get_game_perspective(actor_id)
-            # Build reactions: Ron first, else Pon/Chi
-            has_any = False
-            if rs.can_ron():
-                moves.append(Ron())
-                has_any = True
-            else:
-                opts = self.get_call_options(rs)
-                for tiles in opts.get('pon', []):
-                    moves.append(Pon(tiles))
-                for tiles in opts.get('chi', []):
-                    moves.append(Chi(tiles))
-                has_any = bool(moves)
-            # Pass is legal only if there exists at least one other legal reaction
-            if has_any:
-                moves.insert(0, PassCall())
-            return moves
-
-        # Otherwise, action phase: only current player may act
-        if actor_id != self.current_player_idx:
-            return []
-
         gs = self.get_game_perspective(actor_id)
-        # Tsumo if possible
-        if gs.can_tsumo():
-            moves.append(Tsumo())
-        # All discards from current hand
-        for t in list(self._player_hands[actor_id]):
-            moves.append(Discard(t))
-        return moves
+        return gs.legal_moves()
 
     def legality_mask(self, actor_id: int) -> 'np.ndarray':
-        """Return a boolean mask over the flattened action space used by pure policy.
-
-        The mask is of length equal to get_num_actions() and has True for legal
-        action indices for the given actor in the current state, False otherwise.
-        """
-
-        from src.core.learn.pure_policy_dataset import get_num_actions, serialize_action, encode_action_flat_index  # type: ignore
-        n = int(get_num_actions())
-        mask = np.zeros((n,), dtype=bool)
+        """Wrapper: delegate legality mask computation to the player's GamePerspective."""
         gs = self.get_game_perspective(actor_id)
-        ldt = str(gs.last_discarded_tile) if gs.last_discarded_tile is not None else None
-        for m in self.legal_moves(actor_id):
-            ad = serialize_action(m)
-            idx = encode_action_flat_index(ad, ldt)
-            mask[int(idx)] = True
-        return mask
+        return gs.legality_mask()
 
     def _solicit_and_apply_reactions(self) -> bool:
         """Solicit reactions and apply them using the unified step() API.
@@ -829,58 +844,9 @@ class SimpleJong:
         raise SimpleJong.IllegalMoveException("Unsupported move type")
 
     def get_call_options(self, reaction_state: GamePerspective) -> Dict[str, List[List[Tile]]]:
-        """Compute legal call options (pon/chi) for a reacting player given the current last discard.
-
-        Returns a dict: {'pon': List[List[Tile]], 'chi': List[List[Tile]]}
-        where each inner list contains the two tiles from the player's hand required to complete the call.
-        """
-        options: Dict[str, List[List[Tile]]] = {'pon': [], 'chi': []}
-        last = self.last_discarded_tile
-        last_from = self.last_discard_player
-        if last is None or last_from is None:
-            return options
-        # Cannot react to own discard
-        if last_from == reaction_state.player_id:
-            return options
-
-        # Build count map for player's hand
-        hand = list(reaction_state.player_hand)
-
-        # Pon: need two identical tiles to last
-        same = [t for t in hand if t.suit == last.suit and t.tile_type == last.tile_type]
-        if len(same) >= 2:
-            options['pon'].append([same[0], same[1]])
-
-        # Chi: only the left player relative to discarder
-        left_player = (last_from + 1) % 4
-        if reaction_state.player_id == left_player and last.suit in (Suit.PINZU, Suit.SOUZU):
-            v = last.tile_type.value
-            s = last.suit
-            def has_tile(val: int) -> Optional[Tile]:
-                for t in hand:
-                    if t.suit == s and t.tile_type.value == val:
-                        return t
-                return None
-            # (v-2, v-1)
-            if v - 2 >= 1 and v - 1 >= 1:
-                a = has_tile(v - 2)
-                b = has_tile(v - 1)
-                if a and b:
-                    options['chi'].append([a, b])
-            # (v-1, v+1)
-            if v - 1 >= 1 and v + 1 <= 9:
-                a = has_tile(v - 1)
-                b = has_tile(v + 1)
-                if a and b:
-                    options['chi'].append([a, b])
-            # (v+1, v+2)
-            if v + 1 <= 9 and v + 2 <= 9:
-                a = has_tile(v + 1)
-                b = has_tile(v + 2)
-                if a and b:
-                    options['chi'].append([a, b])
-
-        return options
+        """Wrapper retained for backward compatibility; delegates to GamePerspective."""
+        # Use the passed-in perspective if provided; otherwise compute from actor_id
+        return reaction_state.get_call_options()
 
     def _remove_matching_tiles(self, player_id: int, suit: Suit, tile_type: TileType, count: int) -> None:
         """Remove up to 'count' tiles matching suit and tile_type from player's hand by value."""
@@ -1092,77 +1058,92 @@ class MCTSNode:
         return best_child.action
 
 
-class PQNetwork:
-    """Policy-value network implemented in PyTorch (keeps legacy API where feasible)."""
+if TORCH_AVAILABLE:
+    class PQNetwork:
+        """Policy-value network implemented in PyTorch (keeps legacy API where feasible)."""
 
-    class _TorchPQ(nn.Module):
-        def __init__(self, input_dim: int, hidden_size: int):
-            super().__init__()
-            self.fc1 = nn.Linear(input_dim, hidden_size)
-            self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
-            self.fc3 = nn.Linear(hidden_size // 2, hidden_size // 2)
-            # Heads
-            self.head_action = nn.Linear(hidden_size // 2, 5)
-            self.head_tile1 = nn.Linear(hidden_size // 2, 18)
-            self.head_tile2 = nn.Linear(hidden_size // 2, 18)
-            self.head_value = nn.Linear(hidden_size // 2, 1)
+        class _TorchPQ(nn.Module):
+            def __init__(self, input_dim: int, hidden_size: int):
+                super().__init__()
+                self.fc1 = nn.Linear(input_dim, hidden_size)
+                self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
+                self.fc3 = nn.Linear(hidden_size // 2, hidden_size // 2)
+                # Heads
+                self.head_action = nn.Linear(hidden_size // 2, 5)
+                self.head_tile1 = nn.Linear(hidden_size // 2, 18)
+                self.head_tile2 = nn.Linear(hidden_size // 2, 18)
+                self.head_value = nn.Linear(hidden_size // 2, 1)
 
-        def forward(self, x: torch.Tensor):
-            x = F.relu(self.fc1(x))
-            x = F.dropout(x, p=0.3, training=self.training)
-            x = F.relu(self.fc2(x))
-            x = F.dropout(x, p=0.3, training=self.training)
-            x = F.relu(self.fc3(x))
-            pa = F.softmax(self.head_action(x), dim=-1)
-            pt1 = F.softmax(self.head_tile1(x), dim=-1)
-            pt2 = F.softmax(self.head_tile2(x), dim=-1)
-            val = torch.tanh(self.head_value(x))
-            return pa, pt1, pt2, val
+            def forward(self, x: torch.Tensor):
+                x = F.relu(self.fc1(x))
+                x = F.dropout(x, p=0.3, training=self.training)
+                x = F.relu(self.fc2(x))
+                x = F.dropout(x, p=0.3, training=self.training)
+                x = F.relu(self.fc3(x))
+                pa = F.softmax(self.head_action(x), dim=-1)
+                pt1 = F.softmax(self.head_tile1(x), dim=-1)
+                pt2 = F.softmax(self.head_tile2(x), dim=-1)
+                val = torch.tanh(self.head_value(x))
+                return pa, pt1, pt2, val
 
-    def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = 50):
-        if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch is required for PQNetwork. Please install torch.")
-        self.hidden_size = hidden_size
-        self.embedding_dim = embedding_dim
-        self.max_turns = max_turns
-        # Compute flattened feature size used by our simple MLP
-        self._flat_dim = (12 * 5) + (4 * self.max_turns * self.embedding_dim) + 50
-        self.model = PQNetwork._TorchPQ(self._flat_dim, hidden_size)
-        self.model.eval()
-    
-    def evaluate(self, game_state: 'GamePerspective') -> Tuple[Dict[str, np.ndarray], float]:
-        """
-        Evaluate a game state and return (policy, value)
-        policy: dict containing three heads:
-          - 'action': np.ndarray shape (5,)
-          - 'tile1': np.ndarray shape (18,)
-          - 'tile2': np.ndarray shape (18,)
-        value: estimated state value (-1 to 1)
-        """
-        # Extract features
-        features = self._extract_features(game_state)
+        def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = 50):
+            self.hidden_size = hidden_size
+            self.embedding_dim = embedding_dim
+            self.max_turns = max_turns
+            # Compute flattened feature size used by our simple MLP
+            self._flat_dim = (12 * 5) + (4 * self.max_turns * self.embedding_dim) + 50
+            self.model = PQNetwork._TorchPQ(self._flat_dim, hidden_size)
+            self.model.eval()
         
-        # Flatten inputs into a single vector
-        flat_parts: List[np.ndarray] = []
-        # hand (12,5)
-        flat_parts.append(features[0].reshape(-1))
-        # 4 discard tensors
-        for i in range(1, 5):
-            flat_parts.append(features[i].reshape(-1))
-        # game state (50,)
-        flat_parts.append(features[5].reshape(-1))
-        x = np.concatenate(flat_parts, axis=0)[None, :].astype(np.float32)
-        with torch.no_grad():
-            pa, pt1, pt2, val = self.model(torch.from_numpy(x))
-        pred_action, pred_tile1, pred_tile2, value = (
-            pa.numpy(), pt1.numpy(), pt2.numpy(), val.numpy()
-        )
-        policy = {
-            'action': pred_action[0],
-            'tile1': pred_tile1[0],
-            'tile2': pred_tile2[0]
-        }
-        return policy, float(value[0][0])
+        def evaluate(self, game_state: 'GamePerspective') -> Tuple[Dict[str, np.ndarray], float]:
+            """
+            Evaluate a game state and return (policy, value)
+            policy: dict containing three heads:
+              - 'action': np.ndarray shape (5,)
+              - 'tile1': np.ndarray shape (18,)
+              - 'tile2': np.ndarray shape (18,)
+            value: estimated state value (-1 to 1)
+            """
+            # Extract features
+            features = self._extract_features(game_state)
+            
+            # Flatten inputs into a single vector
+            flat_parts: List[np.ndarray] = []
+            # hand (12,5)
+            flat_parts.append(features[0].reshape(-1))
+            # 4 discard tensors
+            for i in range(1, 5):
+                flat_parts.append(features[i].reshape(-1))
+            # game state (50,)
+            flat_parts.append(features[5].reshape(-1))
+            x = np.concatenate(flat_parts, axis=0)[None, :].astype(np.float32)
+            with torch.no_grad():
+                pa, pt1, pt2, val = self.model(torch.from_numpy(x))
+            pred_action, pred_tile1, pred_tile2, value = (
+                pa.numpy(), pt1.numpy(), pt2.numpy(), val.numpy()
+            )
+            policy = {
+                'action': pred_action[0],
+                'tile1': pred_tile1[0],
+                'tile2': pred_tile2[0]
+            }
+            return policy, float(value[0][0])
+else:
+    class PQNetwork:  # pragma: no cover - CPU-only test stubs
+        """Stub PQNetwork when torch is unavailable to allow imports in CPU-only tests."""
+
+        def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = 50):
+            self.hidden_size = hidden_size
+            self.embedding_dim = embedding_dim
+            self.max_turns = max_turns
+
+        def evaluate(self, game_state: 'GamePerspective') -> Tuple[Dict[str, np.ndarray], float]:
+            policy = {
+                'action': np.full(5, 1.0 / 5.0, dtype=np.float32),
+                'tile1': np.full(18, 1.0 / 18.0, dtype=np.float32),
+                'tile2': np.full(18, 1.0 / 18.0, dtype=np.float32),
+            }
+            return policy, 0.0
     
     def _extract_features(self, game_state: 'GamePerspective') -> List[np.ndarray]:
         """Extract features from game state using the new convolutional architecture"""

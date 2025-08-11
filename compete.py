@@ -40,49 +40,38 @@ def _import_class(class_path: str) -> Type:
 
 
 
-def build_players(classes_csv: str, models_csv: Optional[str]) -> List[Player]:
-    """Build four players from a comma-separated class list and optional per-seat models.
+def build_players(models_csv: Optional[str]) -> List[Player]:
+    """Build four players inferred from model paths.
 
-    Examples:
-    --players "PurePolicyPlayer,Player,Player,Player" --models "/path/m1.keras,,,
-    --players "core.learn.pure_policy_player.PurePolicyPlayer,Player,Player,Player" --models "m1.keras,-,-,-"
+    Rule: non-empty/non-'-' model path => PurePolicyPlayer with that model; otherwise baseline Player.
     """
-    class_names = [c.strip() for c in classes_csv.split(',')]
-    assert len(class_names) == 4, 'Exactly 4 player classes required'
-    model_paths = [''] * 4
+    model_paths = ['-','-','-','-']
     if models_csv:
         model_paths = [m.strip() for m in models_csv.split(',')]
         if len(model_paths) != 4:
             raise ValueError('If provided, --models must have exactly 4 comma-separated entries (use - for none)')
 
-    # Cache nets per unique model path
     path_to_net: dict[str, PurePolicyNetwork] = {}
-
     players: List[Player] = []
-    for i, cname in enumerate(class_names):
-        cls = _import_class(cname)
-        if issubclass(cls, PurePolicyPlayer):
-            mp = model_paths[i] if i < len(model_paths) else ''
-            if not mp or mp == '-':
-                raise ValueError(f'Model path required for PurePolicyPlayer at seat {i}')
+    for i in range(4):
+        mp = model_paths[i] if i < len(model_paths) else '-'
+        if mp and mp != '-':
             if mp not in path_to_net:
-                net = PurePolicyNetwork()
+                net = PurePolicyNetwork(embedding_dim=8)
                 net.load_model(mp)
                 path_to_net[mp] = net
-            players.append(cls(i, path_to_net[mp]))
-        elif issubclass(cls, Player):
-            players.append(cls(i))
+            players.append(PurePolicyPlayer(i, path_to_net[mp]))
         else:
-            raise ValueError(f'Unsupported player class: {cname}')
+            players.append(Player(i))
     return players
 
 
-def play_n_games(n: int, players_config: str, models_config: Optional[str]) -> Tuple[np.ndarray, np.ndarray]:
+def play_n_games(n: int, models_config: Optional[str]) -> Tuple[np.ndarray, np.ndarray]:
     wins = np.zeros(4, dtype=np.int32)
     losses = np.zeros(4, dtype=np.int32)
     iterator = tqdm(range(n), desc='Competing') if tqdm else range(n)
     for _ in iterator:
-        players = build_players(players_config, models_config)
+        players = build_players(models_config)
         game = SimpleJong(players)
         game.play_round()
         # Outcomes: winners (one or multiple), loser (discarder) or None
@@ -97,12 +86,11 @@ def play_n_games(n: int, players_config: str, models_config: Optional[str]) -> T
 
 def main():
     parser = argparse.ArgumentParser(description='Run head-to-head competitions among 4 players')
-    parser.add_argument('--players', type=str, default='PurePolicyPlayer,Player,Player,Player', help='Comma-separated class names for 4 seats (e.g., PurePolicyPlayer,Player,Player,Player)')
-    parser.add_argument('--models', type=str, default='training_data/generation_1/pure_policy_model_flat.keras,-,-,-', help='Comma-separated model paths for each seat (use - for none)')
+    parser.add_argument('--models', type=str, default='-,-,-,-', help='Comma-separated model paths for each seat (use - or empty for none). Non-empty => PurePolicyPlayer; empty => baseline Player')
     parser.add_argument('--games', type=int, default=100, help='Number of games to play')
     args = parser.parse_args()
 
-    wins, losses = play_n_games(args.games, args.players, args.models)
+    wins, losses = play_n_games(args.games, args.models)
     totals = wins + losses
     rewards = wins.astype(np.int32) - losses.astype(np.int32)
     neither = (args.games - totals).astype(np.int32)  # per-seat draws

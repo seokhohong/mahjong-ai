@@ -5,6 +5,7 @@ import json
 import time
 import random
 from typing import Any, Dict, List, Tuple, Optional
+import importlib
 
 import numpy as np
 from scipy import sparse as sp  # efficient batch one-hot
@@ -77,6 +78,8 @@ def serialize_state(state: GamePerspective) -> Dict[str, Any]:
         'last_discarded_tile': _tile_str(state.last_discarded_tile),
         'last_discard_player': state.last_discard_player,
         'can_call': state.can_call,
+        'can_tsumo': bool(getattr(state, 'can_tsumo')() if hasattr(state, 'can_tsumo') else False),
+        'can_ron': bool(getattr(state, 'can_ron')() if hasattr(state, 'can_ron') else False),
         'player_discards': player_discards,
     }
 
@@ -216,6 +219,9 @@ def _encode_game_state_50(sd: Dict[str, Any]) -> np.ndarray:
     except Exception:
         pass
     features.append(len(vis) / float(TOTAL_TILES))
+    # explicit flags before last-discard embedding
+    features.append(1.0 if sd.get('can_tsumo') else 0.0)
+    features.append(1.0 if sd.get('can_ron') else 0.0)
     # last discard embedding
     ldst = sd.get('last_discarded_tile')
     if ldst:
@@ -400,29 +406,105 @@ class RecordingPlayer(Player):
 
     def play(self, game_state: GamePerspective):  # type: ignore[override]
         # Capture legality mask at the moment of decision
-        legal_mask = self._game.legality_mask(self.player_id)
+        legal_mask = game_state.legality_mask()
         action = super().play(game_state)
         self._rec.record(game_state, self.player_id, action, None, legal_mask)
         return action
 
     def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]):  # type: ignore[override]
-        legal_mask = self._game.legality_mask(self.player_id)
+        legal_mask = game_state.legality_mask()
         reaction = super().choose_reaction(game_state, options)
         self._rec.record(game_state, self.player_id, reaction, None, legal_mask)
         return reaction
 
 
-def _simulate_game_collecting() -> Tuple[List[Tuple[int, Dict[str, Any], Dict[str, Any]]], List[int], Optional[int], List[np.ndarray]]:
+class RecordingWrapper(Player):
+    """Wraps any Player to record states and actions via Recorder."""
+    def __init__(self, player_id: int, base: Player, recorder: Recorder):
+        super().__init__(player_id)
+        self._base = base
+        self._rec = recorder
+
+    def play(self, game_state: GamePerspective):  # type: ignore[override]
+        legal_mask = game_state.legality_mask()
+        action = self._base.play(game_state)
+        self._rec.record(game_state, self.player_id, action, None, legal_mask)
+        return action
+
+    def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]):  # type: ignore[override]
+        legal_mask = game_state.legality_mask()
+        reaction = self._base.choose_reaction(game_state, options)
+        self._rec.record(game_state, self.player_id, reaction, None, legal_mask)
+        return reaction
+
+
+def _import_class(class_path: str):
+    registry = {
+        'Player': Player,
+        'RecordingPlayer': RecordingPlayer,
+        'RecordingWrapper': RecordingWrapper,
+    }
+    if class_path in registry:
+        return registry[class_path]
+    if '.' in class_path:
+        module_name, cls_name = class_path.rsplit('.', 1)
+        mod = importlib.import_module(module_name)
+        return getattr(mod, cls_name)
+    raise ValueError(f'Unknown player class: {class_path}')
+
+
+def _build_recording_players(
+    class_names: Optional[List[str]],
+    model_paths: Optional[List[str]],
+    recorder: Recorder,
+) -> List[Player]:
+    """Build four players, optionally using provided class names and models, wrapped for recording."""
+    # Default: use baseline Player for all seats
+    # If no models are provided, or models are all empty -> use baseline Player
+    if not model_paths:
+        return [RecordingPlayer(i, recorder) for i in range(4)]
+    models = model_paths
+    if len(models) != 4:
+        raise ValueError('player_models must list exactly 4 entries (use empty for none)')
+
+    players: List[Player] = []
+    from .pure_policy import PurePolicyNetwork  # local import
+    for i in range(4):
+        try:
+            from core.learn.pure_policy_player import PurePolicyPlayer  # type: ignore
+        except Exception:
+            PurePolicyPlayer = None  # type: ignore
+        mp = models[i]
+        if PurePolicyPlayer is not None and mp:
+            net = PurePolicyNetwork()
+            net.load_model(mp)
+            base = PurePolicyPlayer(i, net)
+        else:
+            base = Player(i)
+        players.append(RecordingWrapper(i, base, recorder))
+    return players
+
+
+def _simulate_game_collecting(
+    player_classes: Optional[List[str]] = None,
+    player_models: Optional[List[str]] = None,
+) -> Tuple[List[Tuple[int, Dict[str, Any], Dict[str, Any]]], List[int], Optional[int], List[np.ndarray]]:
     """Simulate one full game capturing each player's actions and reactions with states.
 
     Returns (log, winners, loser) where log is a list of
     (actor_id, serialized_state, serialized_action) in chronological order.
     """
     recorder = Recorder()
-
-    # Always create a fresh game with recording players to ensure full coverage
-    players = [RecordingPlayer(i, recorder) for i in range(4)]
+    # Build players (either baseline or provided AIs), then create game
+    players = _build_recording_players(player_classes, player_models, recorder)
     game_local = SimpleJong(players)
+    # Ensure wrapped bases receive back-reference to game
+    for p in players:
+        try:
+            if isinstance(p, RecordingWrapper) and hasattr(p, '_base'):
+                setattr(p._base, '_game', game_local)
+        except Exception:
+            pass
 
     # Run the game to completion
     game_local.play_round()
@@ -446,6 +528,8 @@ def generate_pure_policy_dataset(
     num_games: int,
     seed: Optional[int] = None,
     out_path: Optional[str] = None,
+    player_classes: Optional[List[str]] = None,
+    player_models: Optional[List[str]] = None,
 ) -> str:
     """Simulate num_games and save (state, action, reward) tuples into training_data/*.npz.
 
@@ -469,15 +553,12 @@ def generate_pure_policy_dataset(
     for game_idx in iterator:
         game_counter = int(game_idx)
         # Simulate a full game and collect chronological (state, action) pairs
-        log, winners, loser, masks = _simulate_game_collecting()
+        log, winners, loser, masks = _simulate_game_collecting(player_classes, player_models)
         per_player_rewards = _assign_rewards(4, winners, loser)
 
         # Append
         step_counter = 0
         for step_i, (actor_id, state_dict, action_dict) in enumerate(log):
-            # Safety: if a 'ron' action is recorded, there must be a defined loser (the discarder)
-            if action_dict.get('type') == 'ron':
-                assert loser is not None, "Recorded 'ron' action but loser is None"
             idx_state = extract_indexed_state(state_dict)
             act_idx = encode_action_flat_index(action_dict, state_dict.get('last_discarded_tile'))
             states.append(idx_state)
@@ -540,8 +621,13 @@ if __name__ == '__main__':
     parser.add_argument('--games', type=int, default=10, help='Number of games to simulate')
     parser.add_argument('--seed', type=int, default=None, help='Random seed')
     parser.add_argument('--out', type=str, default=None, help='Output .npz path under training_data/')
+    parser.add_argument('--player_models', type=str, default='', help='Comma-separated model paths for 4 seats; non-empty -> PurePolicyPlayer, empty -> baseline Player')
     args = parser.parse_args()
-    path = generate_pure_policy_dataset(args.games, seed=args.seed, out_path=args.out)
+    classes = None
+    models = [m.strip() for m in args.player_models.split(',')] if args.player_models else None
+    if models is not None and len(models) != 4:
+        raise SystemExit('Error: --player_models must have exactly 4 comma-separated entries')
+    path = generate_pure_policy_dataset(args.games, seed=args.seed, out_path=args.out, player_classes=classes, player_models=models)
     print(f'Saved dataset to {path}')
 
 

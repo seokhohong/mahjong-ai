@@ -52,7 +52,7 @@ def demo_mcts_ai():
         
         # Get game state and let player decide
         game_state = game.get_turn_snapshot(game.current_player_idx)
-        action = current_player.play(game_state)
+        action = current_player.play(),, game_state
         
         # Handle the action
         if isinstance(action, Tsumo):
@@ -158,7 +158,7 @@ def demo_mcts_vs_random():
         
         # Get game state and let player decide
         game_state = game.get_turn_snapshot(game.current_player_idx)
-        action = current_player.play(game_state)
+        action = current_player.play(),, game_state
         
         # Handle the action
         if isinstance(action, Tsumo):

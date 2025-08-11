@@ -249,6 +249,11 @@ class TestPurePolicyDataset(unittest.TestCase):
             mask |= (y_flat[:, tsumo_idx] == 1.0)
         self.assertTrue(np.any(mask), "No 'ron' or 'tsumo' actions recorded in dataset")
 
+        # Extended check: any recorded ron/tsumo action must not have negative reward (not sure if this is logically needed)
+        # (winners get +1, discarder -1, others 0)
+        self.assertTrue(np.all(rewards[mask] >= 0.0),
+                        f"Found negative rewards attached to ron/tsumo rows: {rewards[mask][rewards[mask] < 0.0]}")
+
     def test_reward_assignment_for_immediate_ron_scenario(self):
         # Build a trivial, deterministic scenario:
         # - Player 1 discards 3p
@@ -273,20 +278,20 @@ class TestPurePolicyDataset(unittest.TestCase):
         # Wrap behaviors with a recording player so actions (including Ron) are explicitly captured
         class RecDiscardThreeP(RecordingPlayer):
             def play(self, game_state: GamePerspective):  # type: ignore[override]
-                legal_mask = self._game.legality_mask(self.player_id)
+                legal_mask = game_state.legality_mask()
                 action = Discard(Tile(Suit.PINZU, TileType.THREE))
                 self._rec.record(game_state, self.player_id, action, None, legal_mask)
                 return action
 
         class RecAlwaysRonIfPossible(RecordingPlayer):
             def play(self, game_state: GamePerspective):  # type: ignore[override]
-                legal_mask = self._game.legality_mask(self.player_id)
+                legal_mask = game_state.legality_mask()
                 action = Discard(game_state.player_hand[0])
                 self._rec.record(game_state, self.player_id, action, None, legal_mask)
                 return action
 
             def choose_reaction(self, game_state: GamePerspective, options):  # type: ignore[override]
-                legal_mask = self._game.legality_mask(self.player_id)
+                legal_mask = game_state.legality_mask()
                 if game_state.can_ron():
                     reaction = Ron()
                 else:
@@ -296,13 +301,13 @@ class TestPurePolicyDataset(unittest.TestCase):
 
         class RecAlwaysPass(RecordingPlayer):
             def play(self, game_state: GamePerspective):  # type: ignore[override]
-                legal_mask = self._game.legality_mask(self.player_id)
+                legal_mask = game_state.legality_mask()
                 action = Discard(game_state.player_hand[0])
                 self._rec.record(game_state, self.player_id, action, None, legal_mask)
                 return action
 
             def choose_reaction(self, game_state: GamePerspective, options):  # type: ignore[override]
-                legal_mask = self._game.legality_mask(self.player_id)
+                legal_mask = game_state.legality_mask()
                 reaction = PassCall()
                 self._rec.record(game_state, self.player_id, reaction, None, legal_mask)
                 return reaction

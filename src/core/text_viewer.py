@@ -6,11 +6,19 @@ Text viewer for the current SimpleJong API.
 - Runs the actual engine loop (SimpleJong.play_round) so logic is identical
 - Produces concise narration suitable for debugging illegal/edge states
 
-Run:
-  python3 -m core.text_viewer --games 1 --tile_copies 4
+Run examples:
+- Baseline players only:
+    .venv312/Scripts/python -m src.core.text_viewer --games 1 --tile_copies 4
+- Use a PurePolicyPlayer in seat 0 with a model:
+    .venv312/Scripts/python -m src.core.text_viewer --games 1 --pure_policy_model models/pure_policy_5k.pt
 """
 
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
+import os
+import sys
+
+# Ensure 'core' absolute imports work when running as a module
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import argparse
 
 from src.core.game import (
@@ -21,6 +29,8 @@ from src.core.game import (
     Ron,
     Discard,
 )
+from src.core.learn.pure_policy import PurePolicyNetwork
+from src.core.learn.pure_policy_player import PurePolicyPlayer
 
 
 def _fmt_hand(tiles: List[Tile]) -> str:
@@ -86,7 +96,7 @@ class TextViewerPlayer(Player):
             pass
 
     def play(self, game_state: Any) -> Any:
-        action = self._base.play(game_state)
+        action = self._base.play(),, game_state
         self._log_turn(game_state, action)
         return action
 
@@ -96,7 +106,7 @@ class TextViewerPlayer(Player):
         return action
 
 
-def simulate_with_text(tile_copies: int = 4, seed: int = 0) -> List[str]:
+def simulate_with_text(tile_copies: int = 4, seed: int = 0, pure_policy_model: Optional[str] = None) -> List[str]:
     """Run a single game with wrapped players and return narration lines."""
     import random
     if seed:
@@ -105,10 +115,26 @@ def simulate_with_text(tile_copies: int = 4, seed: int = 0) -> List[str]:
     lines: List[str] = []
 
     # Build wrapped players
-    base_players = [Player(i) for i in range(4)]
+    base_players: List[Player] = [Player(i) for i in range(4)]
+    # If a model path is provided, seat 0 uses PurePolicyPlayer with that model
+    if pure_policy_model:
+        try:
+            net = PurePolicyNetwork(embedding_dim=8)
+            net.load_model(pure_policy_model)
+            base_players[0] = PurePolicyPlayer(0, net)
+            lines.append(f"Seat 0 using PurePolicyPlayer with model '{pure_policy_model}'")
+        except Exception as e:
+            lines.append(f"Failed to load pure policy model '{pure_policy_model}': {e}. Falling back to baseline Player.")
     players = [TextViewerPlayer(i, base_players[i], lines) for i in range(4)]
 
     game = SimpleJong(players, tile_copies=tile_copies)
+    # Ensure wrapped base players receive game back-reference
+    for i, wp in enumerate(players):
+        try:
+            if isinstance(wp, TextViewerPlayer) and hasattr(wp, "_base"):
+                setattr(wp._base, "_game", game)
+        except Exception:
+            pass
 
     # Run the actual engine loop
     try:
@@ -138,10 +164,15 @@ def main() -> int:
     parser.add_argument('--games', type=int, default=1, help='How many games to simulate')
     parser.add_argument('--tile_copies', type=int, default=4, help='Copies per tile type in wall')
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
+    parser.add_argument('--pure_policy_model', type=str, default='', help='Path to .pt model for seat 0 (PurePolicyPlayer)')
     args = parser.parse_args()
 
     for g in range(args.games):
-        lines = simulate_with_text(tile_copies=max(1, int(args.tile_copies)), seed=(args.seed + g))
+        lines = simulate_with_text(
+            tile_copies=max(1, int(args.tile_copies)),
+            seed=(args.seed + g),
+            pure_policy_model=(args.pure_policy_model or None),
+        )
         print(f"=== Game {g} ===")
         for line in lines:
             print(line)
