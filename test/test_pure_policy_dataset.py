@@ -337,8 +337,8 @@ class TestPurePolicyDataset(unittest.TestCase):
         game.tiles = [Tile(Suit.SOUZU, TileType.NINE)]
         game.current_player_idx = 1
 
-        winner = game.play_round()
-        self.assertEqual(winner, 2)
+        game.play_round()
+        self.assertEqual(game.get_winners(), [2])
         self.assertEqual(game.get_winners(), [2])
         self.assertEqual(game.get_loser(), 1)
 

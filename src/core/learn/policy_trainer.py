@@ -52,6 +52,7 @@ def train_policy_gradient(
     learning_rate: float = 1e-4,
     verbose: int = 1,
     early_stopping_patience: int = 5,
+    init_weights: str | None = None,
 ) -> str:
     """Train a policy-only network with reward-weighted loss (policy gradient surrogate).
 
@@ -106,6 +107,19 @@ def train_policy_gradient(
         embedding_dim=embedding_dim,
         max_turns=max_turns,
     )
+
+    # Optionally initialize from an existing weights file before training
+    if init_weights is not None and isinstance(init_weights, str) and len(init_weights) > 0:
+        try:
+            if os.path.exists(init_weights) or os.path.exists(init_weights + ('' if init_weights.endswith('.pt') else '.pt')):
+                net.load_model(init_weights)
+                if verbose:
+                    print(f"Initialized network from weights: {init_weights}")
+            else:
+                if verbose:
+                    print(f"Warning: init weights file not found: {init_weights}")
+        except Exception as e:
+            print(f"Warning: failed to load init weights '{init_weights}': {e}")
     # Robust device selection & reporting
     try:
         # GPU truly available only if CUDA reports device_count > 0
@@ -150,22 +164,24 @@ def train_policy_gradient(
     sample_weight: np.ndarray = w_tr
     # No value head in the pure-policy model
 
-    # Fit
-    net.model.fit(
-        [hands_tr, discs_tr, called_tr, gss_tr],
-        targets,
-        epochs=epochs,
-        batch_size=min(batch_size, hands_tr.shape[0] if hands_tr.shape[0] > 0 else 1),
-        verbose=verbose,
-        shuffle=True,
-        early_stopping_patience=early_stopping_patience,
-        sample_weight=sample_weight,
-        val_x_list=[hands_ho, discs_ho, called_ho, gss_ho],
-        val_targets={'policy_flat': y_ho},
-        val_sample_weight=w_ho,
-        legality_masks=lm_tr,
-        val_legality_masks=lm_ho,
-    )
+    if epochs > 0:
+        # Fit
+        net.model.fit(
+            [hands_tr, discs_tr, called_tr, gss_tr],
+            targets,
+            epochs=epochs,
+            batch_size=min(batch_size, hands_tr.shape[0] if hands_tr.shape[0] > 0 else 1),
+            verbose=verbose,
+            shuffle=True,
+            early_stopping_patience=early_stopping_patience,
+            sample_weight=sample_weight,
+            val_x_list=[hands_ho, discs_ho, called_ho, gss_ho],
+            val_targets={'policy_flat': y_ho},
+            val_sample_weight=w_ho,
+            legality_masks=lm_tr,
+            val_legality_masks=lm_ho,
+            learning_rate=learning_rate,
+        )
 
     # Metrics are reported per-epoch by the model.fit when validation is provided.
 
@@ -190,6 +206,7 @@ if __name__ == '__main__':
     parser.add_argument('--embed', type=int, default=4)
     from src.core.constants import MAX_TURNS as CONST_MAX_TURNS
     parser.add_argument('--max_turns', type=int, default=int(CONST_MAX_TURNS))
+    parser.add_argument('--init', type=str, default=None, help='Optional path to initial weights (.pt) to load before training')
     args = parser.parse_args()
 
     path = train_policy_gradient(
@@ -203,6 +220,7 @@ if __name__ == '__main__':
         learning_rate=args.lr,
         verbose=1,
         early_stopping_patience=args.patience,
+        init_weights=args.init,
     )
     print(f'Saved model to {path}')
 

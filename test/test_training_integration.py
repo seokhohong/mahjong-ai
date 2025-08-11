@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import json
 import unittest
 import numpy as np
 
@@ -80,40 +81,29 @@ class TestTrainingIntegration(unittest.TestCase):
         copied_decisions = 0
 
         # Simulate 10 games; at each actor turn, compare base Player vs RuleCopyPlayer decisions
-        # This test is fragile since it replicates SimpleJong's logic rather than using it
+        # Use engine's single-turn API to avoid replicating logic
         for g_idx in range(10):
             # Fresh game with four baseline players (we'll decide actions externally)
             players = [Player(i) for i in range(4)]
             game = SimpleJong(players)
 
-            # Play until terminal, advancing the environment using base decisions
+            # Play until terminal; at each new actionable state, compare decisions
             while not game.game_over and (game.tiles or game.last_discarded_tile is not None):
-                # Resolve any outstanding reactions first
-                if game._resolve_outstanding_reactions_if_any():
-                    break
-
-                # Start of turn: draw if needed
-                game._draw_for_current_if_needed()
-
-                # Current actor and perspective (action phase)
+                # Snapshot state before engine acts
                 actor_id = game.current_player_idx
                 gs = game.get_game_perspective(actor_id)
 
-                # Construct deciders attached to the live game
                 base_decider = Player(actor_id)
                 base_decider._game = game  # type: ignore[attr-defined]
                 copy_decider = RuleCopyPlayer(actor_id, net)
                 copy_decider._game = game  # type: ignore[attr-defined]
 
-                # Base and copy decisions for the same state/position
                 base_move = base_decider.play(gs)
                 copy_move = copy_decider.play(gs)
 
-                # Count match on action type and payload (tile) for action phase
                 total_decisions += 1
                 same = type(base_move) is type(copy_move)
                 try:
-                    # For discards, also require same tile
                     from core.game import Discard as _Discard  # type: ignore
                     if isinstance(base_move, _Discard) and isinstance(copy_move, _Discard):
                         same = same and (base_move.tile == copy_move.tile)
@@ -121,30 +111,63 @@ class TestTrainingIntegration(unittest.TestCase):
                     pass
                 if same:
                     copied_decisions += 1
+                else:
+                    try:
+                        from core.game import Tsumo as _Tsumo, Ron as _Ron, Discard as _Discard, Pon as _Pon, Chi as _Chi, PassCall as _Pass  # type: ignore
+                        from core.learn.pure_policy_dataset import serialize_action as _ser_act  # type: ignore
+                        def _action_to_str(a):
+                            if isinstance(a, _Discard):
+                                return f"Discard({a.tile})"
+                            if isinstance(a, _Tsumo):
+                                return "Tsumo()"
+                            if isinstance(a, _Ron):
+                                return "Ron()"
+                            if isinstance(a, _Pon):
+                                return "Pon([" + ", ".join(str(t) for t in a.tiles) + "])"
+                            if isinstance(a, _Chi):
+                                return "Chi([" + ", ".join(str(t) for t in a.tiles) + "])"
+                            if isinstance(a, _Pass):
+                                return "Pass()"
+                            return repr(a)
 
-                # Step the environment using the base player's decision
-                game.step(actor_id, base_move)
-                if game.game_over:
-                    break
+                        sd = serialize_state(gs)
+                        ldt = sd.get('last_discarded_tile')
+                        base_idx = encode_action_flat_index(_ser_act(base_move), ldt)
+                        copy_idx = encode_action_flat_index(_ser_act(copy_move), ldt)
+                        print("\n=== Divergence detected ===")
+                        print(f"game={g_idx} decision_idx={total_decisions} actor={actor_id}")
+                        print(f"base_move={_action_to_str(base_move)} (idx={base_idx})  copy_move={_action_to_str(copy_move)} (idx={copy_idx})")
+                        phase_name = getattr(gs.state, '__name__', str(gs.state))
+                        extras = {
+                            'phase': phase_name,
+                            'is_current_turn': bool(getattr(gs, 'is_current_turn', False)),
+                            'player_id': int(getattr(gs, 'player_id', -1)),
+                            'player_hand': [str(t) for t in getattr(gs, 'player_hand', [])],
+                            'newly_drawn_tile': str(getattr(gs, 'newly_drawn_tile', None)) if getattr(gs, 'newly_drawn_tile', None) is not None else None,
+                            'last_discarded_tile': str(getattr(gs, 'last_discarded_tile', None)) if getattr(gs, 'last_discarded_tile', None) is not None else None,
+                            'last_discard_player': getattr(gs, 'last_discard_player', None),
+                            'called_sets': {pid: [
+                                {
+                                    'call_type': getattr(cs, 'call_type', 'unknown'),
+                                    'tiles': [str(t) for t in getattr(cs, 'tiles', [])],
+                                } for cs in sets
+                            ] for pid, sets in getattr(gs, 'called_sets', {}).items()},
+                            'other_players_discarded': {pid: [str(t) for t in tiles] for pid, tiles in getattr(gs, 'other_players_discarded', {}).items()},
+                        }
+                        print("Extras:")
+                        print(json.dumps(extras, indent=2, sort_keys=True))
+                        print("GamePerspective (serialized):")
+                        print(json.dumps(sd, indent=2, sort_keys=True))
+                    except Exception as e:
+                        print(f"[warn] failed to print divergence details: {e}")
 
-                # If a discard was made, resolve reactions immediately
-                if game.last_discarded_tile is not None and game.last_discard_player is not None:
-                    if game._resolve_reactions_after_discard():
-                        break
-                    # If a call transferred the turn, continue to next loop without advancing
-                    if game._skip_draw_for_current:
-                        continue
-
-                # Advance to next actor otherwise
-                game.current_player_idx = (game.current_player_idx + 1) % 4
-
-                # End game if wall empty and no pending discard
-                if not game.tiles and game.last_discarded_tile is None:
-                    game.game_over = True
+                # Now let the engine perform the actual turn, which may alter current_player_idx
+                winner = game.play_turn()
+                if winner is not None:
                     break
 
         accuracy = (copied_decisions / max(1, total_decisions))
-        self.assertGreaterEqual(accuracy, 0.80, f"RuleCopyPlayer match rate too low: {accuracy*100:.2f}% (need >= 80%)")
+        self.assertGreaterEqual(accuracy, 0.90, f"RuleCopyPlayer match rate too low: {accuracy*100:.2f}% (need >= 90%)")
 
 
 if __name__ == '__main__':

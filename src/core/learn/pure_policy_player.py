@@ -95,10 +95,7 @@ class PurePolicyPlayer(Player):
             return None
         probs = self.predict_policy_probs(gs)
         # Use legality mask to ensure only legal actions are considered
-        try:
-            mask = self._game.legality_mask(self.player_id)
-        except Exception:
-            mask = None
+        mask = gs.legality_mask()
 
         # Determine phase for mapping legal moves -> flattened indices
         if gs.last_discarded_tile is not None and gs.last_discard_player is not None and gs.last_discard_player != gs.player_id:

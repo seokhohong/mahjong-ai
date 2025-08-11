@@ -445,6 +445,7 @@ class _KerasLikeWrapper:
         val_sample_weight: Optional[np.ndarray] = None,
         legality_masks: np.ndarray = None,
         val_legality_masks: Optional[np.ndarray] = None,
+        learning_rate: float = 1e-4,
         ):
         """
         Enhanced policy gradient training with better metrics and stability.
@@ -500,7 +501,7 @@ class _KerasLikeWrapper:
         wb_all = orig_rewards_all
 
         # Setup optimizer with optional learning rate scheduling
-        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=float(learning_rate))
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.5, patience=2, verbose=False
         )

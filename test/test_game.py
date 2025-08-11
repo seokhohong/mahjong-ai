@@ -67,14 +67,14 @@ class TestSimpleJong(unittest.TestCase):
     
     def test_game_round_play(self):
         """Test that a game round can be played (may not have a winner)"""
-        winner = self.game.play_round()
+        self.game.play_round()
         
         # Game should be over after playing a round
         self.assertTrue(self.game.is_game_over())
         
-        # Winner should be None or a valid player ID
-        if winner is not None:
-            self.assertIn(winner, [0, 1, 2, 3])
+        winners = self.game.get_winners() if self.game.is_game_over() else []
+        for w in winners:
+            self.assertIn(w, [0, 1, 2, 3])
 
     def test_state_copy_roundtrip(self):
         """Copying the game via SimpleJong.copy() preserves state and is independent on mutation."""
@@ -195,11 +195,11 @@ class TestSimpleJong(unittest.TestCase):
         game.last_discarded_tile = action.tile
         game.last_discard_player = 0
         # Now trigger reaction resolution by calling play_round step (no tiles to draw => loop ends after reactions)
-        winner = game.play_round()
+        game.play_round()
         winners = game.get_winners()
         self.assertTrue(game.is_game_over())
         self.assertEqual(set(winners), {1, 2})
-        self.assertIn(winner, [1, 2])
+        self.assertTrue(set(winners) <= {1, 2})
 
     def test_play_round_pon_changes_turn(self):
         """Pon should transfer turn to the caller and skip the draw on that next action."""
@@ -281,10 +281,9 @@ class TestSimpleJong(unittest.TestCase):
         game.last_discard_player = 0
 
         # Resolve reactions: expect ron by player 3
-        winner = game.play_round()
+        game.play_round()
         self.assertTrue(game.is_game_over())
         self.assertEqual(set(game.get_winners()), {3})
-        self.assertEqual(winner, 3)
         # Ensure chi/pon did not consume tiles from players 1 and 2
         self.assertIn(Tile(Suit.PINZU, TileType.TWO), game._player_hands[1])
         self.assertIn(Tile(Suit.PINZU, TileType.FOUR), game._player_hands[1])
@@ -340,9 +339,9 @@ class TestSimpleJong(unittest.TestCase):
         game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
         # Prevent draws; trigger immediate reaction resolution
         game.tiles = []
-        winner = game.play_round()
+        game.play_round()
         self.assertTrue(game.is_game_over())
-        self.assertEqual(winner, 1)
+        self.assertEqual(game.get_winners(), [1])
         self.assertEqual(game.get_winners(), [1])
         self.assertEqual(game.get_loser(), 0)
 
@@ -362,11 +361,10 @@ class TestSimpleJong(unittest.TestCase):
         game._player_hands[2] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
         game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
         game.tiles = []
-        winner = game.play_round()
+        game.play_round()
         winners = set(game.get_winners())
         self.assertTrue(game.is_game_over())
         self.assertEqual(winners, {1, 2})
-        self.assertIn(winner, [1, 2])
         self.assertEqual(game.get_loser(), 0)
 
     def test_loser_none_on_tsumo(self):
@@ -382,9 +380,8 @@ class TestSimpleJong(unittest.TestCase):
         game._player_hands[0] = tiles.copy()
         game.current_player_idx = 0
         game.tiles = [Tile(Suit.PINZU, TileType.THREE)]
-        winner = game.play_round()
+        game.play_round()
         self.assertTrue(game.is_game_over())
-        self.assertEqual(winner, 0)
         self.assertEqual(game.get_winners(), [0])
         self.assertIsNone(game.get_loser())
 
@@ -479,9 +476,8 @@ class TestSimpleJong(unittest.TestCase):
         game.last_discarded_tile = None
         game.last_discard_player = None
         # Run the round; with no tiles and no pending reactions, it should end immediately as draw
-        winner = game.play_round()
+        game.play_round()
         self.assertTrue(game.is_game_over())
-        self.assertIsNone(winner)
         self.assertEqual(game.get_winners(), [])
 
     def test_at_least_one_loser_over_20_games(self):

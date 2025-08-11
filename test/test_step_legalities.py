@@ -64,14 +64,15 @@ class TestSimpleJong(unittest.TestCase):
     
     def test_game_round_play(self):
         """Test that a game round can be played (may not have a winner)"""
-        winner = self.game.play_round()
+        self.game.play_round()
         
         # Game should be over after playing a round
         self.assertTrue(self.game.is_game_over())
         
-        # Winner should be None or a valid player ID
-        if winner is not None:
-            self.assertIn(winner, [0, 1, 2, 3])
+        # Winners, if any, can be checked after game_over
+        winners = self.game.get_winners() if self.game.is_game_over() else []
+        for w in winners:
+            self.assertIn(w, [0, 1, 2, 3])
 
     def test_state_copy_roundtrip(self):
         """Copying the game via SimpleJong.copy() preserves state and is independent on mutation."""

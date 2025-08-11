@@ -27,11 +27,11 @@ class TestPurePolicyPlayer(unittest.TestCase):
         game = SimpleJong(players, tile_copies=4)
 
         # Play a single round; ensure no exceptions and game ends
-        winner = game.play_round()
+        game.play_round()
         self.assertTrue(game.is_game_over())
-        # Winner can be None (draw) or 0..3
-        if winner is not None:
-            self.assertIn(winner, [0, 1, 2, 3])
+        # Winners, if any, are valid ids
+        for w in game.get_winners():
+            self.assertIn(w, [0, 1, 2, 3])
 
     def test_move_instantiation(self):
         # Use a dummy network since this mapping test doesn't require inference

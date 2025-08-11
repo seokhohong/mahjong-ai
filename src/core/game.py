@@ -197,13 +197,28 @@ class GamePerspective:
         player_discards: Optional[Dict[int, List[str]]] = None,
         is_current_turn: bool = False,
     ) -> None:
-        self.player_hand = list(player_hand)
+        # Normalize ordering for deterministic behavior in policies/serialization
+        def _tile_sort_key(t: Tile):
+            # Suit order: PINZU then SOUZU, then by numeric rank
+            suit_rank = 0 if t.suit == Suit.PINZU else 1
+            return (suit_rank, t.tile_type.value)
+
+        # Sort the player's hand
+        self.player_hand = sorted(list(player_hand), key=_tile_sort_key)
         if len(self.player_hand) == 0:
             raise InvalidHandStateException()
         self.remaining_tiles = int(remaining_tiles)
         self.player_id = int(player_id)
         self.other_players_discarded = {k: list(v) for k, v in other_players_discarded.items()}
-        self.called_sets = {k: list(v) for k, v in called_sets.items()}
+        # Deep-copy called sets and sort tiles within each set for canonical representation
+        normalized_called_sets: Dict[int, List[CalledSet]] = {}
+        for pid, sets in called_sets.items():
+            norm_list: List[CalledSet] = []
+            for s in list(sets):
+                sorted_tiles = sorted(list(s.tiles), key=_tile_sort_key)
+                norm_list.append(CalledSet(sorted_tiles, s.call_type, s.called_tile, s.caller_position, s.source_position))
+            normalized_called_sets[pid] = norm_list
+        self.called_sets = normalized_called_sets
         self.last_discarded_tile = last_discarded_tile
         self.last_discard_player = last_discard_player
         self.can_call = bool(can_call)
@@ -418,15 +433,15 @@ class Player:
 
     def choose_isolated_discard_state(self, game_state: GamePerspective) -> Tile:
         hand = game_state.player_hand
-        if not hand:
-            return Tile(Suit.PINZU, TileType.ONE)
 
         def neighbor_count(target: Tile) -> int:
             tv = target.tile_type.value
+            # Count same-suit tiles within ±2, including identical ranks (diff=0),
+            # but do not count the tile itself.
             return sum(
                 1
                 for t in hand
-                if t is not target and t.suit == target.suit and 1 <= abs(t.tile_type.value - tv) <= 2
+                if t is not target and t.suit == target.suit and 0 <= abs(t.tile_type.value - tv) <= 2
             )
 
         def edge_distance(target: Tile) -> int:
@@ -600,49 +615,65 @@ class SimpleJong:
     
     def play_round(self) -> Optional[int]:
         """
-        Play through one full game.
-        - Each turn: current player draws (unless skipped), takes an action, and discards.
-        - After each discard, resolve reactions with priority: Ron > Pon > Chi.
-          Multiple Rons can occur on the same discard (multiple winners).
-          Pon/Chi transfer the turn to the caller and skip the next draw for that player.
+        Play through one full game by repeatedly executing single turns.
         Returns the first winner's player_id (for compatibility) or None if no winner.
         """
         while not self.game_over and (self.tiles or self.last_discarded_tile is not None):
-            if self._resolve_outstanding_reactions_if_any():
+            winner = self.play_turn()
+            if winner is not None:
+                return None
+        return None
+
+    def play_turn(self) -> Optional[int]:
+        """Execute exactly one atomic turn of the game.
+
+        A turn consists of:
+        - Resolving any outstanding reactions that prevent a new turn
+        - Drawing for the current player if needed
+        - Asking the current player for an action and applying it
+        - Resolving immediate reactions to a discard
+        - Advancing the turn if not transferred by a call
+
+        Returns the first winner's player_id if the game ends during this turn; otherwise None.
+        """
+        if self.game_over:
+            return (self.winners[0] if self.winners else None)
+
+        # Resolve any pending reactions before a new action phase can begin
+        if self._resolve_outstanding_reactions_if_any():
+            return (self.winners[0] if self.winners else None)
+
+        # Start of turn: draw tile if needed
+        self._draw_for_current_if_needed()
+
+        # Let the current player act
+        current_player = self.players[self.current_player_idx]
+        game_state = self.get_game_perspective(self.current_player_idx)
+        action = current_player.play(game_state)
+
+        # Apply the chosen action via unified step handler (propagate any IllegalMoveException)
+        self.step(self.current_player_idx, action)
+
+        # If the action resulted in game end
+        if self.game_over:
+            return (self.winners[0] if self.winners else None)
+
+        # If a discard just happened, resolve immediate reactions by priority
+        if self.last_discarded_tile is not None and self.last_discard_player is not None:
+            if self._resolve_reactions_after_discard():
                 return (self.winners[0] if self.winners else None)
-
-            # Start of turn: draw tile if needed
-            self._draw_for_current_if_needed()
-
-            # Let the current player act
-            current_player = self.players[self.current_player_idx]
-            game_state = self.get_game_perspective(self.current_player_idx)
-            action = current_player.play(game_state)
-
-            # Apply the chosen action via unified step handler (propagate any IllegalMoveException)
-            self.step(self.current_player_idx, action)
-
-            # If the action resulted in game end, break
-            if self.game_over:
-                return (self.winners[0] if self.winners else None)
-
-            # If a discard just happened, resolve immediate reactions by priority
-            if self.last_discarded_tile is not None and self.last_discard_player is not None:
-                if self._resolve_reactions_after_discard():
-                    return (self.winners[0] if self.winners else None)
-                # If a call transferred the turn, continue loop (skip advancing turn)
-                if self._skip_draw_for_current:
-                    continue
-
-            # Advance to next player (clockwise in this simplified engine)
-            self.current_player_idx = (self.current_player_idx + 1) % 4
-
-            # End game if wall empty and no pending discard
-            if not self.tiles and self.last_discarded_tile is None:
-                self.game_over = True
+            # If a call transferred the turn, do not advance player index or draw again now
+            if self._skip_draw_for_current:
                 return None
 
-        self.game_over = True
+        # Advance to next player (clockwise)
+        self.current_player_idx = (self.current_player_idx + 1) % 4
+
+        # End game if wall empty and no pending discard
+        if not self.tiles and self.last_discarded_tile is None:
+            self.game_over = True
+            return (self.winners[0] if self.winners else None)
+
         return None
 
     # --- Decomposed helpers for round flow ---
@@ -863,8 +894,13 @@ class SimpleJong:
         """Get the first winner's player_id, or None if no winner"""
         return (self.winners[0] if self.winners else None)
 
+    class IncompleteGame(Exception):
+        pass
+
     def get_winners(self) -> List[int]:
-        """Get all winners (supports multiple Rons). Empty if no winner."""
+        """Get all winners after game end; raises if called before game_over."""
+        if not self.game_over:
+            raise SimpleJong.IncompleteGame("Game not complete; winners unavailable")
         return list(self.winners)
     
     def get_loser(self) -> Optional[int]:
