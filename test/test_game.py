@@ -129,10 +129,13 @@ class TestSimpleJong(unittest.TestCase):
 
     def test_reaction_chi_detection_for_left_player(self):
         """With last discard 3p from player 0, player 1 (left) can chi if holding 2p and 4p."""
-        self.game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        self.game.last_discard_player = 0
-        # Player 1 holds 2p and 4p enabling chi
+        # Prepare a real discard from player 0: 3p
+        self.game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         self.game._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        self.game.tiles = []
+        self.game.current_player_idx = 0
+        # Use the public step API to discard
+        self.game.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
 
         rs = self.game.get_game_perspective(1)
         self.assertIs(rs.state, Reaction)
@@ -147,18 +150,21 @@ class TestSimpleJong(unittest.TestCase):
 
     def test_reaction_pon_detection(self):
         """Any player may pon if holding two of the discarded tile."""
-        self.game.last_discarded_tile = Tile(Suit.SOUZU, TileType.FIVE)
-        self.game.last_discard_player = 0
-        # Player 2 holds two 5s enabling pon
+        # Player 0 discards 5s
+        self.game._player_hands[0] = [Tile(Suit.SOUZU, TileType.FIVE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         self.game._player_hands[2] = [Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.FIVE)]
+        self.game.tiles = []
+        self.game.current_player_idx = 0
+        self.game.step(0, Discard(Tile(Suit.SOUZU, TileType.FIVE)))
+
         rs = self.game.get_game_perspective(2)
         options = self.game.get_call_options(rs)
         self.assertGreaterEqual(len(options['pon']), 1)
 
     def test_reaction_ron_detection(self):
         """Player 1 can ron on 3p if the discard completes four melds."""
-        self.game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        self.game.last_discard_player = 0
+        # Player 0 discards 3p
+        self.game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         # Hand of 11 tiles: 123s, 456s, 789s, and 2p,4p so that 3p completes 2-3-4p
         self.game._player_hands[1] = [
             Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
@@ -166,12 +172,22 @@ class TestSimpleJong(unittest.TestCase):
             Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
             Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR),
         ]
+        self.game.tiles = []
+        self.game.current_player_idx = 0
+        self.game.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
         rs = self.game.get_game_perspective(1)
         self.assertTrue(rs.can_ron())
 
     def test_play_round_multi_ron_priority(self):
         """If two opponents can ron the same discard, both should win and the game ends immediately."""
-        players = [Player(0), Player(1), Player(2), Player(3)]
+        class TestDiscardPlayer(Player):
+            def play(self, game_state: GamePerspective):
+                t = Tile(Suit.PINZU, TileType.THREE)
+                if t in game_state.player_hand:
+                    return Discard(t)
+                return super().play(game_state)
+
+        players = [TestDiscardPlayer(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
         # Current player 0 will discard 3p; configure hands so players 1 and 2 can ron on 3p
         game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
@@ -186,15 +202,7 @@ class TestSimpleJong(unittest.TestCase):
         game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
         game.tiles = []
         game.current_player_idx = 0
-
-        # Force discard 3p by player 0
-        gs0 = game.get_game_perspective(0)
-        action = Discard(Tile(Suit.PINZU, TileType.THREE))
-        game._player_hands[0].remove(action.tile)
-        game.player_discards[0].append(action.tile)
-        game.last_discarded_tile = action.tile
-        game.last_discard_player = 0
-        # Now trigger reaction resolution by calling play_round step (no tiles to draw => loop ends after reactions)
+        # Run the round; deterministic player 0 will discard 3p and trigger reactions
         game.play_round()
         winners = game.get_winners()
         self.assertTrue(game.is_game_over())
@@ -230,10 +238,17 @@ class TestSimpleJong(unittest.TestCase):
 
     def test_play_round_chi_when_no_ron_or_pon(self):
         """Chi should occur if no ron or pon is available for the left player."""
-        players = [Player(0), Player(1), Player(2), Player(3)]
+        class TestDiscardPlayer(Player):
+            def play(self, game_state: GamePerspective):
+                t = Tile(Suit.PINZU, TileType.THREE)
+                if t in game_state.player_hand:
+                    return Discard(t)
+                return super().play(game_state)
+
+        players = [TestDiscardPlayer(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
         # Only player 1 (left) can chi; no one can ron or pon
-        game._player_hands[0] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         non_partitionable_souzu = [
             Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO),
             Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
@@ -243,8 +258,7 @@ class TestSimpleJong(unittest.TestCase):
         game._player_hands[2] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
         game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
         game.tiles = []
-        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        game.last_discard_player = 0
+        game.current_player_idx = 0
 
         game.play_round()
         # Player 1 should have consumed 2p and 4p due to chi call
@@ -253,10 +267,17 @@ class TestSimpleJong(unittest.TestCase):
 
     def test_reaction_priority_ron_over_pon_and_chi(self):
         """When chi, pon, and ron are all available, ron must occur and chi/pon must not."""
-        players = [Player(0), Player(1), Player(2), Player(3)]
+        class TestDiscardPlayer(Player):
+            def play(self, game_state: GamePerspective):
+                t = Tile(Suit.PINZU, TileType.THREE)
+                if t in game_state.player_hand:
+                    return Discard(t)
+                return super().play(game_state)
+
+        players = [TestDiscardPlayer(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
         # Prepare hands and outstanding discard 3p by player 0
-        game._player_hands[0] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         # Player 1: chi-capable with 2p and 4p
         filler_no_meld = [
             Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.FOUR),
@@ -277,8 +298,7 @@ class TestSimpleJong(unittest.TestCase):
         game._player_hands[3] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
         # No further draws; set outstanding discard from player 0
         game.tiles = []
-        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        game.last_discard_player = 0
+        game.current_player_idx = 0
 
         # Resolve reactions: expect ron by player 3
         game.play_round()
@@ -311,14 +331,9 @@ class TestSimpleJong(unittest.TestCase):
 
         gs0 = game.get_game_perspective(0)
         action = players[0].play(gs0)
+        game.step(0, action)
         self.assertIsInstance(action, Discard)
         self.assertEqual(str(action.tile), '3p')
-
-        # Apply minimal discard effects
-        game._player_hands[0].remove(action.tile)
-        game.player_discards[0].append(action.tile)
-        game.last_discarded_tile = action.tile
-        game.last_discard_player = 0
 
         rs = game.get_game_perspective(1)
         opts = game.get_call_options(rs)
@@ -326,41 +341,55 @@ class TestSimpleJong(unittest.TestCase):
 
     def test_loser_recorded_on_single_ron(self):
         """On a Ron, the loser should be the discarder."""
-        game = self.game
-        # Set last discard 3p by player 0
-        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        game.last_discard_player = 0
-        # Player 1 has 11 tiles that become 4 melds with 3p (2p,4p present)
+        class TestDiscardPlayer(Player):
+            def play(self, game_state: GamePerspective):
+                t = Tile(Suit.PINZU, TileType.THREE)
+                if t in game_state.player_hand:
+                    return Discard(t)
+                return super().play(game_state)
+
+        players = [TestDiscardPlayer(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Player 0 will discard 3p; player 1 can ron on that discard
         base_s = [
             Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
             Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
             Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
-        # Prevent draws; trigger immediate reaction resolution
+        # Prevent draws and start at player 0
         game.tiles = []
+        game.current_player_idx = 0
         game.play_round()
         self.assertTrue(game.is_game_over())
-        self.assertEqual(game.get_winners(), [1])
         self.assertEqual(game.get_winners(), [1])
         self.assertEqual(game.get_loser(), 0)
 
     def test_loser_recorded_on_multi_ron(self):
         """On multiple Rons, loser remains the single discarder."""
-        players = [Player(0), Player(1), Player(2), Player(3)]
+        class TestDiscardPlayer(Player):
+            def play(self, game_state: GamePerspective):
+                target = Tile(Suit.PINZU, TileType.THREE)
+                if target in game_state.player_hand:
+                    return Discard(target)
+                return super().play(game_state)
+
+        players = [TestDiscardPlayer(0), Player(1), Player(2), Player(3)]
         game = SimpleJong(players)
-        # Discard 3p by player 0; players 1 and 2 can ron
-        game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        game.last_discard_player = 0
+        # Player 0 will discard 3p; players 1 and 2 can ron on that discard
         base_s = [
             Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
             Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
             Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
         game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
         game._player_hands[2] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
         game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
         game.tiles = []
+        game.current_player_idx = 0
+        # Let the deterministic player 0 discard and trigger reactions within the turn
         game.play_round()
         winners = set(game.get_winners())
         self.assertTrue(game.is_game_over())

@@ -43,7 +43,8 @@ class TestPurePolicyTraining(unittest.TestCase):
             s = s.item() if hasattr(s, 'item') else s
             hands.append(s['hand_idx'])
             discs.append(s['disc_idx'])
-            called.append(s.get('called_sets_idx', np.zeros((4,4,3), dtype=np.int32)))
+            from core.constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP  # type: ignore
+            called.append(s.get('called_sets_idx', np.zeros((4,_MCSP,3), dtype=np.int32)))
             gss.append(s['game_state'])
         hands = np.asarray(hands, dtype=np.int32)
         discs = np.asarray(discs, dtype=np.int32)

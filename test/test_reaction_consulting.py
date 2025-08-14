@@ -45,7 +45,8 @@ class TestReactionConsulting(unittest.TestCase):
         g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
 
         # Resolve reactions; should choose chi from player 1; players 2 and 3 should not be consulted
-        g._resolve_reactions_after_discard()
+        g._solicit_and_apply_reactions()
+        g.check_game_over()
 
         self.assertFalse(p2.consulted)
         self.assertFalse(p3.consulted)
@@ -89,8 +90,8 @@ class TestReactionConsulting(unittest.TestCase):
         self.assertFalse(any(isinstance(m, Chi) for m in moves))
 
         # Resolve reactions via the engine priority (Ron should win immediately)
-        ended = g._resolve_reactions_after_discard()
-        self.assertTrue(ended)
+        g._solicit_and_apply_reactions()
+        g.check_game_over()
         self.assertTrue(g.is_game_over())
         self.assertIn(2, g.get_winners())
         self.assertEqual(g.get_loser(), 1)
@@ -139,13 +140,16 @@ class TestReactionConsulting(unittest.TestCase):
             Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX)
         ], 'chi', Tile(Suit.SOUZU, TileType.FIVE), caller_position=2, source_position=1)
         g._player_called_sets[2] = [cs1, cs2]
-        # Concealed tiles: 1p,2p,7p,8p,9p; last discard 3p completes 123p and 789p
+        # Concealed tiles: 1p,2p,7p,8p,9p; a discard of 3p completes 123p and 789p
         g._player_hands[2] = [
             Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO),
             Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.EIGHT), Tile(Suit.PINZU, TileType.NINE),
         ]
-        g.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
-        g.last_discard_player = 1
+        # Simulate a real discard of 3p by player 1 to enter reaction phase for player 2
+        g._player_hands[1] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        g.tiles = []
+        g.current_player_idx = 1
+        self.assertTrue(g.step(1, Discard(Tile(Suit.PINZU, TileType.THREE))))
 
         # Legal moves for player 2 should include Ron and not Pon/Chi
         moves = g.legal_moves(2)

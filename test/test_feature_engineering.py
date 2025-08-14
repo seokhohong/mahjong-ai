@@ -44,7 +44,11 @@ class TestFeatureEngineering(unittest.TestCase):
             # Build CNN inputs via the same precompute path
             hands = idx['hand_idx'][None, :]
             discs = idx['disc_idx'][None, :, :]
-            called = idx.get('called_sets_idx', np.zeros((1, 4, 4, 3), dtype=np.int32))
+            from core.constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP  # type: ignore
+            cs = idx.get('called_sets_idx')
+            if cs is None:
+                cs = np.zeros((4, _MCSP, 3), dtype=np.int32)
+            called = cs[None, :, :, :]
             gss = idx['game_state'][None, :]
             H, C, D, G = wrap._precompute_cnn(hands, discs, called, gss)
             return H, C, D, G
@@ -105,7 +109,11 @@ class TestFeatureEngineering(unittest.TestCase):
             idx = extract_indexed_state(sd)
             hands = idx['hand_idx'][None, :]
             discs = idx['disc_idx'][None, :, :]
-            called = idx.get('called_sets_idx', np.zeros((1, 4, 4, 3), dtype=np.int32))
+            from core.constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP  # type: ignore
+            cs = idx.get('called_sets_idx')
+            if cs is None:
+                cs = np.zeros((4, _MCSP, 3), dtype=np.int32)
+            called = cs[None, :, :, :]
             gss = idx['game_state'][None, :]
             H, C, D, G = wrap._precompute_cnn(hands, discs, called, gss)
             return C.copy(), D.copy()

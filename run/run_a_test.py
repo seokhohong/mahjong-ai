@@ -7,34 +7,28 @@ import random
 # Ensure src is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from core.game import SimpleJong  # type: ignore
+from core.game import SimpleJong, Player, Tile, Suit, TileType  # type: ignore
 from core.learn.pure_policy_dataset import Recorder, RecordingPlayer, serialize_action  # type: ignore
 
 
 
 def main():
-    random.seed(13579)
-
-    for _ in range(20):
-        rec = Recorder()
-        players = [RecordingPlayer(i, rec) for i in range(4)]
-        game = SimpleJong(players)
-
-        # Play a full round; recorder captures all actions and reactions
-        game.play_round()
-
-        # Build action type log for this game
-        action_types = []
-        for (actor_id, gp, action_obj) in rec.events:
-            ad = serialize_action(action_obj)
-            action_types.append(ad.get('type'))
-
-        if 'ron' in action_types:
-            if action_types[-1] != 'ron':
-                print("what")
-            # If any ron occurred, it must end the game; thus the last recorded action must be ron
-            #self.assertEqual(action_types[-1], 'ron',
-            #                 f"Expected last action to be 'ron' when a ron occurs; got {action_types[-1]}")
+    players = [Player(0), Player(1), Player(2), Player(3)]
+    game = SimpleJong(players)
+    # Discard 3p by player 0; players 1 and 2 can ron
+    game.last_discarded_tile = Tile(Suit.PINZU, TileType.THREE)
+    game.last_discard_player = 0
+    base_s = [
+        Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+        Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+        Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
+    ]
+    game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+    game._player_hands[2] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+    game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+    game.tiles = []
+    game.play_round()
+    winners = set(game.get_winners())
 
 
 if __name__ == '__main__':

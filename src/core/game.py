@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import copy
 
-from src.core.constants import MAX_CALLED_SETS_PER_PLAYER
+from src.core.constants import MAX_CALLED_SETS_PER_PLAYER, TILE_COPIES_DEFAULT
 
 # Import PyTorch; keep legacy flag name for compatibility with tests
 try:
@@ -344,6 +344,9 @@ class GamePerspective:
                 return True
             opts = self.get_call_options()
             return bool(opts.get('pon')) or bool(opts.get('chi'))
+        # When Ron is available, calling Pon/Chi is not legal (must choose Ron or Pass)
+        if self.can_ron() and isinstance(move, (Pon, Chi)):
+            return False
         if isinstance(move, Pon):
             opts = self.get_call_options()
             legal_sets = opts.get('pon', [])
@@ -476,10 +479,45 @@ class Player:
         # Must return a Reaction; default to Pass
         return PassCall()
 
+
+class HeuristicPlayer(Player):
+    """Rules-based player with optional exploration via temperature.
+
+    When temperature in (0,1], choose a random legal action with probability = temperature,
+    otherwise follow the base heuristic. Temperature=0 -> deterministic base behavior.
+    """
+    def __init__(self, player_id: int, temperature: float = 0.0):
+        super().__init__(player_id)
+        self.temperature = max(0.0, float(temperature))
+
+    def play(self, game_state: GamePerspective) -> Action:  # type: ignore[override]
+        legal = game_state.legal_moves()
+        if self.temperature > 0.0 and legal:
+            if random.random() < self.temperature:
+                # Prefer random discard when available; otherwise uniform over legal actions
+                discards = [m for m in legal if isinstance(m, Discard)]
+                return random.choice(discards or legal)
+        return super().play(game_state)
+
+    def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]) -> Reaction:  # type: ignore[override]
+        if self.temperature > 0.0:
+            # Build legal reactions list from options
+            legal_reacts: List[Reaction] = []
+            if game_state.can_ron():
+                legal_reacts.append(Ron())
+            for tiles in options.get('pon', []):
+                legal_reacts.append(Pon(tiles))
+            for tiles in options.get('chi', []):
+                legal_reacts.append(Chi(tiles))
+            legal_reacts.append(PassCall())
+            if legal_reacts and random.random() < self.temperature:
+                return random.choice(legal_reacts)
+        return super().choose_reaction(game_state, options)
+
 class SimpleJong:
     """Simplified Mahjong game with Pinzu and Souzu tiles"""
     NUM_PLAYERS = 4
-    def __init__(self, players: List[Player], tile_copies: int = 6):
+    def __init__(self, players: List[Player], tile_copies: int = TILE_COPIES_DEFAULT):
         if len(players) != SimpleJong.NUM_PLAYERS:
             raise ValueError("SimpleJong requires exactly 4 players")
         
@@ -613,18 +651,15 @@ class SimpleJong:
         
         return None
     
-    def play_round(self) -> Optional[int]:
+    def play_round(self):
         """
         Play through one full game by repeatedly executing single turns.
         Returns the first winner's player_id (for compatibility) or None if no winner.
         """
-        while not self.game_over and (self.tiles or self.last_discarded_tile is not None):
-            winner = self.play_turn()
-            if winner is not None:
-                return None
-        return None
+        while not self.is_game_over():
+            self.play_turn()
 
-    def play_turn(self) -> Optional[int]:
+    def play_turn(self):
         """Execute exactly one atomic turn of the game.
 
         A turn consists of:
@@ -636,12 +671,6 @@ class SimpleJong:
 
         Returns the first winner's player_id if the game ends during this turn; otherwise None.
         """
-        if self.game_over:
-            return (self.winners[0] if self.winners else None)
-
-        # Resolve any pending reactions before a new action phase can begin
-        if self._resolve_outstanding_reactions_if_any():
-            return (self.winners[0] if self.winners else None)
 
         # Start of turn: draw tile if needed
         self._draw_for_current_if_needed()
@@ -654,37 +683,26 @@ class SimpleJong:
         # Apply the chosen action via unified step handler (propagate any IllegalMoveException)
         self.step(self.current_player_idx, action)
 
-        # If the action resulted in game end
-        if self.game_over:
-            return (self.winners[0] if self.winners else None)
-
         # If a discard just happened, resolve immediate reactions by priority
         if self.last_discarded_tile is not None and self.last_discard_player is not None:
-            if self._resolve_reactions_after_discard():
-                return (self.winners[0] if self.winners else None)
+            self._solicit_and_apply_reactions()
+            self.check_game_over()
             # If a call transferred the turn, do not advance player index or draw again now
             if self._skip_draw_for_current:
-                return None
+                return
 
         # Advance to next player (clockwise)
         self.current_player_idx = (self.current_player_idx + 1) % 4
 
+        self.check_game_over()
+
+    # checks if game ending conditions are met and sets self.game_over if so
+    def check_game_over(self):
+        if len(self.winners) > 0:
+            self.game_over = True
         # End game if wall empty and no pending discard
         if not self.tiles and self.last_discarded_tile is None:
             self.game_over = True
-            return (self.winners[0] if self.winners else None)
-
-        return None
-
-    # --- Decomposed helpers for round flow ---
-    def _resolve_outstanding_reactions_if_any(self) -> bool:
-        """Resolve any pending reactions that existed before a new turn could begin.
-        Returns True if the game ended during resolution.
-        """
-        if self.last_discarded_tile is None or self.last_discard_player is None:
-            return False
-
-        return self._solicit_and_apply_reactions()
 
     def _draw_for_current_if_needed(self) -> None:
         if self._skip_draw_for_current:
@@ -695,10 +713,6 @@ class SimpleJong:
             self._player_hands[self.current_player_idx].append(new_tile)
             self.last_drawn_tile = new_tile
             self.last_drawn_player = self.current_player_idx
-
-    def _resolve_reactions_after_discard(self) -> bool:
-        """Resolve reactions immediately after a discard. Returns True if game ended."""
-        return self._solicit_and_apply_reactions()
 
     # --- Legality API ---
     class IllegalMoveException(Exception):
@@ -723,14 +737,12 @@ class SimpleJong:
         gs = self.get_game_perspective(actor_id)
         return gs.legality_mask()
 
-    def _solicit_and_apply_reactions(self) -> bool:
+    def _solicit_and_apply_reactions(self):
         """Solicit reactions and apply them using the unified step() API.
 
         Priority: Ron (multiple allowed) > Pon (one, tie-break by seat order from left of discarder) > Chi (left only).
         Returns True if the game ended.
         """
-        if self.last_discarded_tile is None or self.last_discard_player is None:
-            return False
 
         discarder = self.last_discard_player
 
@@ -747,6 +759,10 @@ class SimpleJong:
                 'pon': call_opts.get('pon', []),
                 'chi': call_opts.get('chi', []),
             }
+            if opts['ron']:
+                del opts['pon']
+                del opts['chi']
+
             per_player_options[i] = opts
             # Only solicit when there is any legal reaction available
             if opts['ron'] or opts['pon'] or opts['chi']:
@@ -763,8 +779,7 @@ class SimpleJong:
             # Multiple Rons: end immediately; record all winners and the single loser (discarder)
             self.winners = ronners[:]
             self.loser = discarder
-            self.game_over = True
-            return True
+            return
 
         # 2) Pon: among players who chose Pon, pick by seat order starting from left of discarder
         seat_order = [ (discarder + 1 + k) % 4 for k in range(3) ]
@@ -773,20 +788,23 @@ class SimpleJong:
                 move = chosen[i]
                 if self.is_legal(i, move):
                     self.step(i, move)
-                    return False
+                    return
 
         # 3) Chi: only left of discarder may chi, and only if chosen
         left = (discarder + 1) % 4
         if left in chosen and isinstance(chosen[left], Chi):
             move = chosen[left]
             if self.is_legal(left, move):
+                if len(self._player_hands[left]) == 2 and isinstance(move, Chi):
+                    print(self.is_legal(left, move))
+                    print("what")
                 self.step(left, move)
-                return False
+                return
 
         # No reactions accepted; clear pending discard
         self.last_discarded_tile = None
         self.last_discard_player = None
-        return False
+        return
 
     # --- Unified step API ---
     def step(self, actor_id: int, move: Union[Action, Reaction]) -> bool:
@@ -794,6 +812,7 @@ class SimpleJong:
 
         Raises IllegalMoveException if not legal. Returns True if applied.
         """
+
         if not self.is_legal(actor_id, move):
             raise SimpleJong.IllegalMoveException("Illegal move")
 
@@ -824,7 +843,6 @@ class SimpleJong:
             if actor_id not in self.winners:
                 self.winners.append(actor_id)
             self.loser = self.last_discard_player
-            self.game_over = True
             return True
 
         # Pon
@@ -848,6 +866,9 @@ class SimpleJong:
             self.last_discard_player = None
             self.current_player_idx = actor_id
             self._skip_draw_for_current = True
+            if len(self._player_called_sets[actor_id]) == 4:
+                raise InvalidHandStateException()
+
             return True
 
         # Chi
@@ -865,6 +886,8 @@ class SimpleJong:
                 source_position=self.last_discard_player if self.last_discard_player is not None else -1,
             )
             self._player_called_sets[actor_id].append(called)
+            if len(self._player_called_sets[actor_id]) == 4:
+                raise InvalidHandStateException()
             self.last_discarded_tile = None
             self.last_discard_player = None
             self.current_player_idx = actor_id

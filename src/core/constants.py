@@ -8,15 +8,15 @@ NUM_PLAYERS: int = 4
 # Tile system
 NUM_SUITS: int = 2           # Pinzu, Souzu
 NUM_RANKS: int = 9           # 1..9
-TILE_COPIES_DEFAULT: int = 4 # number of identical copies per rank/suit
+TILE_COPIES_DEFAULT: int = 6 # number of identical copies per rank/suit
 
 # Totals
 TOTAL_TILES: int = NUM_SUITS * NUM_RANKS * TILE_COPIES_DEFAULT  # 72
 
 # Hand / melds
 MAX_HAND_TILES: int = 14
-MAX_CALLED_SETS_PER_PLAYER: int = 4
-MAX_CALLED_SETS_ALL_OPPONENTS: int = (NUM_PLAYERS - 1) * MAX_CALLED_SETS_PER_PLAYER  # 12
+MAX_CALLED_SETS_PER_PLAYER: int = 3
+MAX_CALLED_SETS_ALL_OPPONENTS: int = (NUM_PLAYERS - 1) * MAX_CALLED_SETS_PER_PLAYER  # 9
 # Number of tiles that define a called set (pon/chi)
 MAX_TILES_PER_CALLED_SET: int = 3
 

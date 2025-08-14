@@ -35,6 +35,7 @@ from core.constants import (
     MAX_HAND_TILES,
 )
 from core.encoding import tile_str_to_index
+from core.parallel_jong import ParallelJong
 
 
 def _tile_str(tile: Optional[Tile]) -> Optional[str]:
@@ -168,11 +169,23 @@ def _get_tile_index(tile: Tile) -> int:
     return tile_to_index(tile)
 
 
+_EMBED_CACHE: Optional[np.ndarray] = None
+
+
+def _init_embed_cache() -> np.ndarray:
+    arr = np.zeros((18, EMBED_DIM), dtype=np.float32)
+    # Deterministic per-index embeddings equivalent to seeding by index
+    for i in range(18):
+        rng = np.random.RandomState(i)
+        arr[i] = (rng.randn(EMBED_DIM) * 0.1).astype(np.float32)
+    return arr
+
+
 def _tile_embedding_from_index(idx: int) -> np.ndarray:
-    np.random.seed(idx)
-    emb = np.random.randn(EMBED_DIM) * 0.1
-    np.random.seed()
-    return emb
+    global _EMBED_CACHE
+    if _EMBED_CACHE is None:
+        _EMBED_CACHE = _init_embed_cache()
+    return _EMBED_CACHE[idx]
 
 
 def _encode_hand_indices(player_hand: List[str]) -> np.ndarray:
@@ -395,7 +408,7 @@ class Recorder:
     ) -> None:
         self.events.append((actor_id, gs, action_obj))
         self.event_probs.append(None if probs is None else np.asarray(probs, dtype=np.float32))
-        self.event_legal_masks.append(np.asarray(legal_mask, dtype=np.float32))
+        self.event_legal_masks.append(np.asarray(legal_mask, dtype=np.bool_))
 
 
 class RecordingPlayer(Player):
@@ -524,6 +537,128 @@ def _simulate_game_collecting(
     return log, list(winners), loser, masks
 
 
+def _build_recording_game(
+    player_classes: Optional[List[str]] = None,
+    player_models: Optional[List[str]] = None,
+) -> Tuple[SimpleJong, Recorder]:
+    """Construct a `SimpleJong` with recording wrappers and return (game, recorder)."""
+    recorder = Recorder()
+    players = _build_recording_players(player_classes, player_models, recorder)
+    game_local = SimpleJong(players)
+    for p in players:
+        try:
+            if isinstance(p, RecordingWrapper) and hasattr(p, '_base'):
+                setattr(p._base, '_game', game_local)
+        except Exception:
+            pass
+    return game_local, recorder
+
+
+def generate_pure_policy_dataset_parallel(
+    num_games: int,
+    seed: Optional[int] = None,
+    out_path: Optional[str] = None,
+    player_classes: Optional[List[str]] = None,
+    player_models: Optional[List[str]] = None,
+    threads: int = 2,
+) -> str:
+    """Parallel version of dataset generation focusing on CPU-bound game simulation.
+
+    Runs multiple `SimpleJong` games concurrently (no ParallelPolicyPlayer required).
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    threads = max(1, int(threads))
+
+    # Build all games with attached recorders
+    games: List[SimpleJong] = []
+    recorders: List[Recorder] = []
+    for _ in range(num_games):
+        g, rec = _build_recording_game(player_classes, player_models)
+        games.append(g)
+        recorders.append(rec)
+
+    # Run games in parallel
+    pj = ParallelJong(games, threads=threads, num_concurrent=threads, progress_desc='Generating dataset')
+    pj.run(show_progress=True)
+
+    # Collect outputs mirroring the sequential path
+    states: List[Dict[str, np.ndarray]] = []
+    y_flat_idx: List[int] = []
+    rewards: List[float] = []
+    records_game_id: List[int] = []
+    records_step_id: List[int] = []
+    legality_masks: List[np.ndarray] = []
+
+    game_counter = 0
+    skipped_illegal = 0
+    for gi, (game_local, recorder) in enumerate(zip(games, recorders)):
+        winners = list(game_local.get_winners())
+        loser = game_local.get_loser()
+        per_player_rewards = _assign_rewards(4, winners, loser)
+        step_counter = 0
+        for step_i, (actor_id, gp, action_obj) in enumerate(recorder.events):
+            sd = serialize_state(gp)
+            ad = serialize_action(action_obj)
+            idx_state = extract_indexed_state(sd)
+            act_idx = encode_action_flat_index(ad, sd.get('last_discarded_tile'))
+            mask_arr = np.asarray(recorder.event_legal_masks[step_i], dtype=bool)
+            assert np.sum(mask_arr) > 0, f"Found step with no legal actions: {step_i}"
+            if not mask_arr[int(act_idx)]:
+                skipped_illegal += 1
+                continue
+            states.append(idx_state)
+            y_flat_idx.append(int(act_idx))
+            rewards.append(float(per_player_rewards[actor_id]))
+            records_game_id.append(game_counter)
+            records_step_id.append(step_counter)
+            legality_masks.append(mask_arr)
+            step_counter += 1
+        game_counter += 1
+
+    # Prepare output directory and filename
+    base_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..')
+    base_dir = os.path.abspath(base_dir)
+    out_dir = os.path.join(base_dir, 'training_data')
+    os.makedirs(out_dir, exist_ok=True)
+    if out_path is None:
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        out_path = os.path.join(out_dir, f'pure_policy_{ts}.npz')
+
+    # Convert and save (same as sequential)
+    np_states = np.asarray(states, dtype=object)
+    n = len(y_flat_idx)
+    cols = np.asarray(y_flat_idx, dtype=np.int32)
+    num_actions = get_num_actions()
+    np_policy = np.zeros((n, num_actions), dtype=np.float32)
+    np_policy[np.arange(n, dtype=np.int32), cols] = 1.0
+    np_rewards = np.asarray(rewards, dtype=np.float32)
+    np_game_ids = np.asarray(records_game_id, dtype=np.int32)
+    np_step_ids = np.asarray(records_step_id, dtype=np.int32)
+    np_legal_masks = np.asarray(legality_masks, dtype=np.bool_)
+
+    np.savez(
+        out_path,
+        states=np_states,
+        y_flat=np_policy,
+        rewards=np_rewards,
+        game_ids=np_game_ids,
+        step_ids=np_step_ids,
+        action_labels=np.asarray(get_action_labels(), dtype=object),
+        legal_masks=np_legal_masks,
+    )
+
+    if skipped_illegal:
+        try:
+            import sys as _sys
+            print(f"[generate_pure_policy_dataset_parallel] Skipped {skipped_illegal} illegal samples", file=_sys.stderr)
+        except Exception:
+            pass
+
+    return out_path
+
+
 def generate_pure_policy_dataset(
     num_games: int,
     seed: Optional[int] = None,
@@ -550,6 +685,7 @@ def generate_pure_policy_dataset(
     # Progress iterator
     iterator = tqdm(range(num_games), desc='Generating pure-policy games') if tqdm else range(num_games)
     game_counter = 0
+    skipped_illegal = 0
     for game_idx in iterator:
         game_counter = int(game_idx)
         # Simulate a full game and collect chronological (state, action) pairs
@@ -561,16 +697,17 @@ def generate_pure_policy_dataset(
         for step_i, (actor_id, state_dict, action_dict) in enumerate(log):
             idx_state = extract_indexed_state(state_dict)
             act_idx = encode_action_flat_index(action_dict, state_dict.get('last_discarded_tile'))
+            # Append legality mask aligned with this step and filter illegal actions
+            mask_arr = np.asarray(masks[step_i], dtype=bool)
+            assert np.sum(mask_arr) > 0, f"Found step with no legal actions: {step_i}"
+            if not mask_arr[int(act_idx)]:
+                skipped_illegal += 1
+                continue
             states.append(idx_state)
             y_flat_idx.append(int(act_idx))
             rewards.append(float(per_player_rewards[actor_id]))
             records_game_id.append(game_counter)
             records_step_id.append(step_counter)
-            # Append legality mask aligned with this step
-            # step_i maps into masks
-            # Ensure shape matches num_actions
-            mask_arr = np.asarray(masks[step_i], dtype=bool)
-            assert np.sum(mask_arr) > 0, f"Found step with no legal actions: {step_i}"
             legality_masks.append(mask_arr)
             step_counter += 1
 
@@ -589,11 +726,10 @@ def generate_pure_policy_dataset(
     np_states = np.asarray(states, dtype=object)
     # Build fast one-hot for flattened policy
     n = len(y_flat_idx)
-    rows = np.arange(n, dtype=np.int32)
     cols = np.asarray(y_flat_idx, dtype=np.int32)
-    data = np.ones(n, dtype=np.float32)
     num_actions = get_num_actions()
-    np_policy = sp.coo_matrix((data, (rows, cols)), shape=(n, num_actions)).toarray().astype(np.float32)
+    np_policy = np.zeros((n, num_actions), dtype=np.float32)
+    np_policy[np.arange(n, dtype=np.int32), cols] = 1.0
     np_rewards = np.asarray(rewards, dtype=np.float32)
     np_game_ids = np.asarray(records_game_id, dtype=np.int32)
     np_step_ids = np.asarray(records_step_id, dtype=np.int32)
@@ -610,6 +746,13 @@ def generate_pure_policy_dataset(
         action_labels=np.asarray(get_action_labels(), dtype=object),
         legal_masks=np_legal_masks,
     )
+
+    if skipped_illegal:
+        try:
+            import sys as _sys
+            print(f"[generate_pure_policy_dataset] Skipped {skipped_illegal} illegal samples", file=_sys.stderr)
+        except Exception:
+            pass
 
     return out_path
 

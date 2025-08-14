@@ -96,7 +96,7 @@ class TextViewerPlayer(Player):
             pass
 
     def play(self, game_state: Any) -> Any:
-        action = self._base.play(),, game_state
+        action = self._base.play(game_state)
         self._log_turn(game_state, action)
         return action
 

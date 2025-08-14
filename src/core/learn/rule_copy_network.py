@@ -27,7 +27,7 @@ class RuleCopyNetwork:
     training by masking logits of illegal actions.
     """
 
-    def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = MAX_TURNS):
+    def __init__(self, hidden_size: int = 128, embedding_dim: int = 16, max_turns: int = MAX_TURNS):
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch is required for RuleCopyNetwork. Please install torch.")
         # Underlying network is identical
@@ -80,6 +80,7 @@ class _KerasLikeCEWrapper:
         val_sample_weight: Optional[np.ndarray] = None,  # ignored
         legality_masks: Optional[np.ndarray] = None,
         val_legality_masks: Optional[np.ndarray] = None,
+        learning_rate: Optional[float]=1e-3,
     ) -> '_KerasLikeCEWrapper':
         try:
             hands, discs, called, gss = x_list
@@ -95,20 +96,21 @@ class _KerasLikeCEWrapper:
         labels_np = np.argmax(y_flat, axis=1).astype(np.int64)
 
         device = self._owner._device  # type: ignore[attr-defined]
-        hand_seq = torch.from_numpy(hand_seq_np).to(device)
-        calls_seq = torch.from_numpy(calls_seq_np).to(device)
-        disc_seq = torch.from_numpy(disc_seq_np).to(device)
-        gsv_t = torch.from_numpy(gsv_np).to(device)
-        yb_all = torch.from_numpy(labels_np).to(device)
+        # Keep full tensors on CPU; move slices per-batch to avoid GPU OOM
+        hand_seq_all = torch.from_numpy(hand_seq_np)
+        calls_seq_all = torch.from_numpy(calls_seq_np)
+        disc_seq_all = torch.from_numpy(disc_seq_np)
+        gsv_all = torch.from_numpy(gsv_np)
+        yb_all = torch.from_numpy(labels_np)
 
-        lm_all: Optional[torch.Tensor] = None
+        lm_all_cpu: Optional[torch.Tensor] = None
         if legality_masks is not None:
-            lm_all = torch.from_numpy(legality_masks.astype(bool)).to(device)
-            if lm_all.ndim != 2 or lm_all.shape[0] != hand_seq.shape[0] or lm_all.shape[1] != self._owner._num_actions:  # type: ignore[attr-defined]
+            lm_all_cpu = torch.from_numpy(legality_masks.astype(bool))
+            if lm_all_cpu.ndim != 2 or lm_all_cpu.shape[0] != hand_seq_all.shape[0] or lm_all_cpu.shape[1] != self._owner._num_actions:  # type: ignore[attr-defined]
                 raise ValueError("legality_masks must have shape (N, num_actions)")
 
         # Optimizer
-        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=1e-4)  # type: ignore[attr-defined]
+        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=learning_rate)  # type: ignore[attr-defined]
 
         # Validation
         val_labels: Optional[np.ndarray] = None
@@ -119,14 +121,14 @@ class _KerasLikeCEWrapper:
         best_val: float = float('inf')
         epochs_no_improve = 0
 
-        num_samples = hand_seq.shape[0]
+        num_samples = hand_seq_all.shape[0]
         bs = max(1, min(batch_size, num_samples))
 
         for ep in range(max(1, epochs)):
-            # Shuffle indices
-            indices = torch.arange(num_samples, device=device)
+            # Shuffle indices on CPU
+            indices = torch.arange(num_samples)
             if shuffle:
-                indices = indices[torch.randperm(num_samples, device=device)]
+                indices = indices[torch.randperm(num_samples)]
 
             epoch_loss = 0.0
             batch_count = 0
@@ -147,18 +149,18 @@ class _KerasLikeCEWrapper:
             for start in range(0, num_samples, bs):
                 end = min(num_samples, start + bs)
                 idx = indices[start:end]
-                yb = yb_all.index_select(0, idx)
+                yb = yb_all.index_select(0, idx).to(device)
 
                 optimizer.zero_grad(set_to_none=True)
                 logits = self._owner._net(  # type: ignore[attr-defined]
-                    hand_seq.index_select(0, idx),
-                    calls_seq.index_select(0, idx),
-                    disc_seq.index_select(0, idx),
-                    gsv_t.index_select(0, idx),
+                    hand_seq_all.index_select(0, idx).to(device),
+                    calls_seq_all.index_select(0, idx).to(device),
+                    disc_seq_all.index_select(0, idx).to(device),
+                    gsv_all.index_select(0, idx).to(device),
                 )
                 # Mask illegal logits if provided
-                if lm_all is not None:
-                    lm = lm_all.index_select(0, idx)
+                if lm_all_cpu is not None:
+                    lm = lm_all_cpu.index_select(0, idx).to(logits.device)
                     logits = logits.masked_fill(~lm, -1e9)
 
                 # Cross-entropy
@@ -182,31 +184,46 @@ class _KerasLikeCEWrapper:
             if verbose and bar is not None:
                 bar.close()
 
-            # Validation CE
+            # Validation CE (batched to avoid GPU OOM)
             val_ce = None
             val_acc = None
             if val_labels is not None and val_x_list is not None:
                 with torch.no_grad():
                     vh, vd, vc, vg = val_x_list
                     h_np, c_np, d_np, g_np = self._precompute_cnn(vh, vd, vc, vg)
-                    logits_val = self._owner._net(  # type: ignore[attr-defined]
-                        torch.from_numpy(h_np).to(device),
-                        torch.from_numpy(c_np).to(device),
-                        torch.from_numpy(d_np).to(device),
-                        torch.from_numpy(g_np).to(device),
-                    )
-                    if val_legality_masks is not None:
-                        try:
-                            lm_val = torch.from_numpy(val_legality_masks.astype(bool)).to(logits_val.device)
-                            if lm_val.ndim == 2 and lm_val.shape[1] == logits_val.shape[1]:
-                                logits_val = logits_val.masked_fill(~lm_val, -1e9)
-                        except Exception:
-                            pass
-                    labels_t = torch.from_numpy(val_labels).to(logits_val.device)
-                    val_ce = float(F.cross_entropy(logits_val, labels_t).cpu().item()) if labels_t.numel() > 0 else None
-                    if labels_t.numel() > 0:
-                        preds_val = torch.argmax(logits_val, dim=-1)
-                        val_acc = float((preds_val == labels_t).float().mean().cpu().item())
+                    h_all = torch.from_numpy(h_np)
+                    c_all = torch.from_numpy(c_np)
+                    d_all = torch.from_numpy(d_np)
+                    g_all = torch.from_numpy(g_np)
+                    labels_all = torch.from_numpy(val_labels)
+                    lm_val_all = torch.from_numpy(val_legality_masks.astype(bool)) if val_legality_masks is not None else None
+
+                    V = h_all.shape[0]
+                    v_bs = max(1, min(bs, V))
+                    ce_sum = 0.0
+                    total = 0
+                    correct = 0
+                    for v_start in range(0, V, v_bs):
+                        v_end = min(V, v_start + v_bs)
+                        sl = slice(v_start, v_end)
+                        logits_val = self._owner._net(  # type: ignore[attr-defined]
+                            h_all[sl].to(device),
+                            c_all[sl].to(device),
+                            d_all[sl].to(device),
+                            g_all[sl].to(device),
+                        )
+                        if lm_val_all is not None:
+                            lm_b = lm_val_all[sl].to(logits_val.device)
+                            logits_val = logits_val.masked_fill(~lm_b, -1e9)
+                        labels_b = labels_all[sl].to(logits_val.device)
+                        if labels_b.numel() > 0:
+                            ce_sum += float(F.cross_entropy(logits_val, labels_b).cpu().item()) * labels_b.shape[0]
+                            preds_val = torch.argmax(logits_val, dim=-1)
+                            correct += int((preds_val == labels_b).sum().item())
+                            total += int(labels_b.shape[0])
+                    if total > 0:
+                        val_ce = ce_sum / total
+                        val_acc = correct / total
 
             # Early stopping on validation CE if available; else on train loss
             metric_now = val_ce if val_ce is not None else (epoch_loss / max(1, batch_count))

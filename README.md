@@ -19,6 +19,7 @@ If the environment does not exist yet, create it and install dependencies:
 python -m venv .venv312
 .venv312/Scripts/python -m pip install -U pip
 .venv312/Scripts/python -m pip install -r requirements.txt
+.venv312/Scripts/python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
 ## Features
@@ -48,6 +49,9 @@ cd mahjong-ai
 2. Install dependencies inside `.venv312`:
 ```bash
 .venv312/Scripts/python -m pip install -r requirements.txt
+# Install PyTorch matching your platform (CUDA example shown). For CPU-only, omit the index URL.
+# See https://pytorch.org/get-started/locally/ for the correct command for your system.
+.venv312/Scripts/python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
 3. Run the web application (using `.venv312`):

@@ -38,7 +38,11 @@ class RuleCopyPlayer(Player):
         idx = extract_indexed_state(sd)
         hand_idx = idx['hand_idx']
         disc_idx = idx['disc_idx']
-        called_idx = idx.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32))
+        try:
+            from ..constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP
+        except Exception:
+            _MCSP = 3
+        called_idx = idx.get('called_sets_idx', np.zeros((4, _MCSP, 3), dtype=np.int32))
         game_state = idx['game_state']
         return hand_idx, disc_idx, called_idx, game_state
 

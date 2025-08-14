@@ -13,9 +13,9 @@ except Exception as e:  # pragma: no cover
     raise ImportError('PyTorch is required for training. Please install torch.') from e
 
 from src.core.learn.pure_policy import PurePolicyNetwork
+from src.core.learn.reward_config import WIN_REWARD, LOSS_REWARD, NEUTRAL_REWARD
 
-
-def _batch_from_states(states_obj: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _batch_from_states(states_obj: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Convert object array of dict states into model inputs.
 
     Returns (hands_idx, disc_idx, game_state) with shapes:
@@ -32,7 +32,11 @@ def _batch_from_states(states_obj: np.ndarray) -> Tuple[np.ndarray, np.ndarray, 
         hands.append(s['hand_idx'])
         discs.append(s['disc_idx'])
         # called_sets_idx optional for backward compatibility
-        called.append(s.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32)))
+        try:
+            from src.core.constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP
+        except Exception:
+            _MCSP = 3
+        called.append(s.get('called_sets_idx', np.zeros((4, _MCSP, 3), dtype=np.int32)))
         gss.append(s['game_state'])
     hands = np.asarray(hands, dtype=np.int32)
     discs = np.asarray(discs, dtype=np.int32)
@@ -45,7 +49,7 @@ def train_policy_gradient(
     dataset_path: str,
     model_out: str,
     hidden_size: int = 128,
-    embedding_dim: int = 4,
+    embedding_dim: int = 16,
     max_turns: int = 50,
     epochs: int = 3,
     batch_size: int = 128,
@@ -53,6 +57,7 @@ def train_policy_gradient(
     verbose: int = 1,
     early_stopping_patience: int = 5,
     init_weights: str | None = None,
+    cross_validation_split=0.8 # fraction of examples that go to training set
 ) -> str:
     """Train a policy-only network with reward-weighted loss (policy gradient surrogate).
 
@@ -68,6 +73,11 @@ def train_policy_gradient(
     states = data['states']
     y_flat = data['y_flat']
     rewards = data['rewards'].astype(np.float32)
+
+    # try asymmetric rewards
+    rewards = np.where(rewards == 1, WIN_REWARD,
+                       np.where(rewards == -1, LOSS_REWARD, 0.0))
+
     legal_masks = data['legal_masks'].astype(np.bool_) if 'legal_masks' in data.files else None
     game_ids = data['game_ids'].astype(np.int64) if 'game_ids' in data.files else None
 
@@ -78,14 +88,14 @@ def train_policy_gradient(
     num_samples = hands.shape[0]
     if game_ids is None:
         # Fallback: simple last-20% split if game ids are missing
-        split_idx = max(1, int(0.8 * num_samples))
+        split_idx = max(1, int(cross_validation_split * num_samples))
         train_idx = np.arange(0, split_idx)
         hold_idx = np.arange(split_idx, num_samples)
     else:
         unique_games = np.unique(game_ids)
         rng = np.random.RandomState(42)
         rng.shuffle(unique_games)
-        split_g = max(1, int(0.8 * len(unique_games)))
+        split_g = max(1, int(cross_validation_split * len(unique_games)))
         train_games = set(unique_games[:split_g].tolist())
         hold_games = set(unique_games[split_g:].tolist())
         train_mask = np.array([gid in train_games for gid in game_ids], dtype=bool)
@@ -110,16 +120,18 @@ def train_policy_gradient(
 
     # Optionally initialize from an existing weights file before training
     if init_weights is not None and isinstance(init_weights, str) and len(init_weights) > 0:
+        # Resolve to a concrete path (allow omitting .pt extension)
+        resolved_path = init_weights
+        if not resolved_path.endswith('.pt') and os.path.exists(init_weights + '.pt'):
+            resolved_path = init_weights + '.pt'
+        if not os.path.exists(resolved_path):
+            raise FileNotFoundError(f"Init weights file not found: {init_weights}")
         try:
-            if os.path.exists(init_weights) or os.path.exists(init_weights + ('' if init_weights.endswith('.pt') else '.pt')):
-                net.load_model(init_weights)
-                if verbose:
-                    print(f"Initialized network from weights: {init_weights}")
-            else:
-                if verbose:
-                    print(f"Warning: init weights file not found: {init_weights}")
+            net.load_model(resolved_path)
+            if verbose:
+                print(f"Initialized network from weights: {resolved_path}")
         except Exception as e:
-            print(f"Warning: failed to load init weights '{init_weights}': {e}")
+            raise RuntimeError(f"Failed to load init weights '{resolved_path}': {e}") from e
     # Robust device selection & reporting
     try:
         # GPU truly available only if CUDA reports device_count > 0
@@ -180,7 +192,7 @@ def train_policy_gradient(
             val_sample_weight=w_ho,
             legality_masks=lm_tr,
             val_legality_masks=lm_ho,
-            learning_rate=learning_rate,
+            learning_rate=learning_rate
         )
 
     # Metrics are reported per-epoch by the model.fit when validation is provided.
@@ -204,6 +216,7 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (epochs without improvement)')
     parser.add_argument('--hidden', type=int, default=128)
     parser.add_argument('--embed', type=int, default=4)
+    parser.add_argument('--split', type=float, default=0.9)
     from src.core.constants import MAX_TURNS as CONST_MAX_TURNS
     parser.add_argument('--max_turns', type=int, default=int(CONST_MAX_TURNS))
     parser.add_argument('--init', type=str, default=None, help='Optional path to initial weights (.pt) to load before training')
@@ -221,6 +234,7 @@ if __name__ == '__main__':
         verbose=1,
         early_stopping_patience=args.patience,
         init_weights=args.init,
+        cross_validation_split=args.split
     )
     print(f'Saved model to {path}')
 

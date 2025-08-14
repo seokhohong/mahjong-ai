@@ -7,6 +7,10 @@ import importlib
 from typing import List, Tuple, Type, Optional
 
 import numpy as np
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:
+    tqdm = None  # fallback when tqdm is unavailable
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -14,10 +18,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from core.game import SimpleJong, Player
 from core.learn.pure_policy import PurePolicyNetwork
 from core.learn.pure_policy_player import PurePolicyPlayer
-try:
-    from tqdm import tqdm  # type: ignore
-except Exception:
-    tqdm = None  # type: ignore
 
 
 def _import_class(class_path: str) -> Type:
@@ -41,53 +41,56 @@ def _import_class(class_path: str) -> Type:
 
 
 def build_players(models_csv: Optional[str]) -> List[Player]:
-    """Build four players inferred from model paths.
-
-    Rule: non-empty/non-'-' model path => PurePolicyPlayer with that model; otherwise baseline Player.
-    """
+    """Build four players inferred from model paths (single-threaded, direct model calls)."""
     model_paths = ['-','-','-','-']
     if models_csv:
         model_paths = [m.strip() for m in models_csv.split(',')]
         if len(model_paths) != 4:
             raise ValueError('If provided, --models must have exactly 4 comma-separated entries (use - for none)')
 
-    path_to_net: dict[str, PurePolicyNetwork] = {}
     players: List[Player] = []
     for i in range(4):
         mp = model_paths[i] if i < len(model_paths) else '-'
         if mp and mp != '-':
-            if mp not in path_to_net:
-                net = PurePolicyNetwork(embedding_dim=8)
-                net.load_model(mp)
-                path_to_net[mp] = net
-            players.append(PurePolicyPlayer(i, path_to_net[mp]))
+            net = PurePolicyNetwork(embedding_dim=8)
+            net.load_model(mp)
+            players.append(PurePolicyPlayer(i, net))
         else:
             players.append(Player(i))
     return players
 
 
-def play_n_games(n: int, models_config: Optional[str]) -> Tuple[np.ndarray, np.ndarray]:
+def _play_sequential(num_games: int, models_config: Optional[str]) -> Tuple[np.ndarray, np.ndarray]:
+    """Play num_games sequentially (single-threaded) and return wins, losses arrays."""
     wins = np.zeros(4, dtype=np.int32)
     losses = np.zeros(4, dtype=np.int32)
-    iterator = tqdm(range(n), desc='Competing') if tqdm else range(n)
+    iterator = tqdm(range(num_games), desc='Competing') if tqdm else range(num_games)
     for _ in iterator:
         players = build_players(models_config)
         game = SimpleJong(players)
         game.play_round()
-        # Outcomes: winners (one or multiple), loser (discarder) or None
+        
         if game.winners:
             for w in game.winners:
-                wins[w] += 1
+                wins[int(w)] += 1
             if game.loser is not None:
-                losses[game.loser] += 1
-        # Draws add nothing
+                losses[int(game.loser)] += 1
     return wins, losses
+
+
+ # No shared nets/predictors needed for single-threaded path
+
+
+def play_n_games(n: int, models_config: Optional[str]) -> Tuple[np.ndarray, np.ndarray]:
+    """Play n games sequentially and return wins/losses per seat."""
+    return _play_sequential(n, models_config)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Run head-to-head competitions among 4 players')
     parser.add_argument('--models', type=str, default='-,-,-,-', help='Comma-separated model paths for each seat (use - or empty for none). Non-empty => PurePolicyPlayer; empty => baseline Player')
     parser.add_argument('--games', type=int, default=100, help='Number of games to play')
+    # No threading in single-threaded compete
     args = parser.parse_args()
 
     wins, losses = play_n_games(args.games, args.models)

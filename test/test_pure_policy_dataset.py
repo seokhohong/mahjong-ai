@@ -74,7 +74,8 @@ class TestPurePolicyDataset(unittest.TestCase):
         self.assertEqual(s0['disc_idx'].shape, (4, MAX_TURNS))
         self.assertEqual(s0['game_state'].shape, (50,))
         self.assertIn('called_sets_idx', s0)
-        self.assertEqual(s0['called_sets_idx'].shape, (4, 4, 3))
+        from core.constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP  # type: ignore
+        self.assertEqual(s0['called_sets_idx'].shape, (4, _MCSP, 3))
 
     def test_discard_rotation_per_perspective(self):
         # Construct minimal serialized states for two different perspectives

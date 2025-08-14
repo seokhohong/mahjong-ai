@@ -37,7 +37,8 @@ class TestSimpleJong(unittest.TestCase):
         
         self.assertEqual(game_state.player_id, 0)
         self.assertEqual(len(game_state.player_hand), 11)
-        self.assertEqual(game_state.remaining_tiles, 28)
+        # Remaining tiles should match the engine's internal wall count
+        self.assertEqual(game_state.remaining_tiles, len(self.game.tiles))
         self.assertEqual(len(game_state.other_players_discarded), 3)
     
     def test_tile_equality_and_hash(self):

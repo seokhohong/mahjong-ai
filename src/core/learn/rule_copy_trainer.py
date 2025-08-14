@@ -24,7 +24,11 @@ def _batch_from_states(states_obj: np.ndarray) -> Tuple[np.ndarray, np.ndarray, 
         s = s.item() if hasattr(s, 'item') else s
         hands.append(s['hand_idx'])
         discs.append(s['disc_idx'])
-        called.append(s.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32)))
+        try:
+            from src.core.constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP
+        except Exception:
+            _MCSP = 3
+        called.append(s.get('called_sets_idx', np.zeros((4, _MCSP, 3), dtype=np.int32)))
         gss.append(s['game_state'])
     hands = np.asarray(hands, dtype=np.int32)
     discs = np.asarray(discs, dtype=np.int32)
@@ -116,9 +120,10 @@ def train_rule_copy(
         shuffle=True,
         early_stopping_patience=early_stopping_patience,
         val_x_list=[hands_ho, discs_ho, called_ho, gss_ho],
-        val_targets={'policy_flat': y_ho},
+        val_targets={'policy_ flat': y_ho},
         legality_masks=lm_tr,
         val_legality_masks=lm_ho,
+        learning_rate=1e-3
     )
 
     if not model_out.endswith('.pt'):

@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from core.game import (
     SimpleJong, Player, Tile, TileType, Suit,
-    Discard, Tsumo, Ron, Pon, Chi, CalledSet, PassCall
+    Discard, Tsumo, Ron, Pon, Chi, CalledSet, PassCall, InvalidHandStateException, HeuristicPlayer
 )
 
 
@@ -76,10 +76,12 @@ class TestStepLegality(unittest.TestCase):
         discard_tile = Tile(Suit.PINZU, TileType.THREE)
         self.assertTrue(game.is_legal(0, Discard(discard_tile)))
         self.assertTrue(game.step(0, Discard(discard_tile)))
-        # Player 1 rons
+        # Player 1 rons; after Ron step, game_over is set when the round checks end conditions.
         self.assertTrue(game.is_legal(1, Ron()))
         applied = game.step(1, Ron())
         self.assertTrue(applied)
+        # Trigger end-of-round check via a no-op draw/turn (tiles empty so play_round ends quickly)
+        game.check_game_over()
         self.assertTrue(game.is_game_over())
         self.assertEqual(game.get_winners(), [1])
         self.assertEqual(game.get_loser(), 0)
@@ -100,9 +102,9 @@ class TestStepLegality(unittest.TestCase):
         g.current_player_idx = 0
         # Discard 3p by player 0
         g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
-        # Resolve reactions; both 1 and 2 should win, loser is 0
-        ended = g._resolve_reactions_after_discard()
-        self.assertTrue(ended)
+        # Resolve reactions using the public solver; both 1 and 2 should win, loser is 0
+        g._solicit_and_apply_reactions()
+        g.check_game_over()
         self.assertTrue(g.is_game_over())
         winners = set(g.get_winners())
         self.assertEqual(winners, {1, 2})
@@ -120,6 +122,28 @@ class TestStepLegality(unittest.TestCase):
         self.assertFalse(game.is_legal(2, Chi([Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)])))
         with self.assertRaises(SimpleJong.IllegalMoveException):
             game.step(2, Chi([Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]))
+
+    def test_chi_not_legal_with_only_two_tiles_in_hand(self):
+        # Player 0 discards 3p
+        g = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        # Player 0 has a 3p to discard
+        g._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        # Player 1: exactly two tiles in hand (2p, 4p) and three completed called sets
+        cs1 = CalledSet(tiles=[Tile(Suit.PINZU, TileType.ONE)] * 3, call_type='pon', called_tile=Tile(Suit.PINZU, TileType.ONE), caller_position=1, source_position=0)
+        cs2 = CalledSet(tiles=[Tile(Suit.PINZU, TileType.TWO)] * 3, call_type='pon', called_tile=Tile(Suit.PINZU, TileType.TWO), caller_position=1, source_position=0)
+        cs3 = CalledSet(tiles=[Tile(Suit.SOUZU, TileType.THREE)] * 3, call_type='pon', called_tile=Tile(Suit.SOUZU, TileType.THREE), caller_position=1, source_position=0)
+        g._player_called_sets[1] = [cs1, cs2, cs3]
+        g._player_hands[1] = [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        g.tiles = []
+        g.current_player_idx = 0
+        # Discard 3p by player 0
+        self.assertTrue(g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE))))
+        # Legal moves for player 1 should be Ron and Pass; Chi should not be present
+        moves_p1 = g.legal_moves(1)
+        self.assertFalse(g.is_legal(1, Chi([Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)])))
+        self.assertTrue(any(isinstance(m, Ron) for m in moves_p1))
+        self.assertTrue(any(isinstance(m, PassCall) for m in moves_p1))
+        self.assertFalse(any(isinstance(m, Chi) for m in moves_p1))
 
     def test_legal_chi_by_left_player(self):
         game = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
@@ -315,6 +339,8 @@ class TestStepLegality(unittest.TestCase):
         # For actor 1, Pon should be legal
         moves = game.legal_moves(1)
         from core.learn.pure_policy_dataset import get_num_actions, serialize_action, encode_action_flat_index  # type: ignore
+        from core.game import InvalidHandStateException  # type: ignore
+        from core.game import InvalidHandStateException  # type: ignore
         mask = game.legality_mask(1)
         self.assertEqual(len(mask), get_num_actions())
         gs = game.get_game_perspective(1)
@@ -324,6 +350,49 @@ class TestStepLegality(unittest.TestCase):
             ad = serialize_action(m)
             idx = encode_action_flat_index(ad, ldt)
             self.assertTrue(mask[int(idx)], f"Expected mask[{idx}] True for move {type(m).__name__}")
+
+    def test_random_play_legality_consistency(self):
+        import random
+        import numpy as np
+        from core.learn.pure_policy_dataset import get_num_actions, serialize_action, encode_action_flat_index  # type: ignore
+
+        class LegalityCheckPlayer(Player):
+            def play(self, game_state):  # type: ignore[override]
+                moves = game_state.legal_moves()
+                mask = game_state.legality_mask()
+                assert len(mask) == get_num_actions()
+                ldt = str(game_state.last_discarded_tile) if game_state.last_discarded_tile is not None else None
+                legal_idx = set()
+                for m in moves:
+                    ad = serialize_action(m)
+                    idx = int(encode_action_flat_index(ad, ldt))
+                    legal_idx.add(idx)
+                    assert game_state.is_legal(m)
+                mask_idx = set(int(i) for i in np.where(mask)[0].tolist())
+                assert mask_idx == legal_idx
+                return random.choice(moves)
+
+            def choose_reaction(self, game_state, options):  # type: ignore[override]
+                moves = game_state.legal_moves()
+                mask = game_state.legality_mask()
+                assert len(mask) == get_num_actions()
+                ldt = str(game_state.last_discarded_tile) if game_state.last_discarded_tile is not None else None
+                legal_idx = set()
+                for m in moves:
+                    ad = serialize_action(m)
+                    idx = int(encode_action_flat_index(ad, ldt))
+                    legal_idx.add(idx)
+                    assert game_state.is_legal(m)
+                mask_idx = set(int(i) for i in np.where(mask)[0].tolist())
+                assert mask_idx == legal_idx
+                return random.choice(moves)
+
+        random.seed(42)
+        for _ in range(100):
+            players = [LegalityCheckPlayer(0), LegalityCheckPlayer(1), LegalityCheckPlayer(2), HeuristicPlayer(3)]
+            g = SimpleJong(players, tile_copies=6)
+            g.play_round()
+            self.assertTrue(g.is_game_over())
 
 
 if __name__ == '__main__':

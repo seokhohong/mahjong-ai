@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 from src.core.constants import MAX_TURNS
-from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm  # type: ignore
 
 import numpy as np
+
+from .reward_config import WIN_REWARD, LOSS_REWARD, NEUTRAL_REWARD
 
 # Use PyTorch for the learning stack; keep legacy flag name for compatibility with tests
 try:
@@ -35,12 +35,14 @@ class PurePolicyNetwork:
     available for optional auxiliary learning). Architecture and feature encoding mirror PQNetwork.
     """
 
-    def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = MAX_TURNS):
+    def __init__(self, hidden_size: int = 128, embedding_dim: int = 4, max_turns: int = MAX_TURNS, temperature: float = 1.0):
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch is required for PurePolicyNetwork. Please install torch.")
         self.hidden_size = hidden_size
         self.embedding_dim = embedding_dim
         self.max_turns = max_turns
+        # Sampling temperature for inference (>=0). 0 or very small -> near-argmax, >1 -> more exploration
+        self.temperature = float(max(0.0, temperature))
         # Determine action space size once
         from .pure_policy_dataset import get_num_actions  # type: ignore
         self._num_actions = int(get_num_actions())
@@ -211,7 +213,7 @@ class PurePolicyNetwork:
         probs = self.model.predict([
             idx['hand_idx'][None, :],
             idx['disc_idx'][None, :, :],
-            idx.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32))[None, :, :, :],
+            idx.get('called_sets_idx', np.zeros((4, MAX_CALLED_SETS_PER_PLAYER, 3), dtype=np.int32))[None, :, :, :],
             idx['game_state'][None, :],
         ], verbose=0)[0]
         return {'policy': probs}
@@ -435,7 +437,7 @@ class _KerasLikeWrapper:
         x_list: List[np.ndarray],
         y: Dict[str, np.ndarray],
         epochs: int = 1,
-        batch_size: int = 8,
+        batch_size: int = 16,
         verbose: int = 0,
         shuffle: bool = True,
         sample_weight: np.ndarray = None,
@@ -473,20 +475,20 @@ class _KerasLikeWrapper:
         original_rewards = sample_weight.astype(np.float32)
         
         device = self._owner._device
-        hand_seq = torch.from_numpy(hand_seq_np).to(device)
-        calls_seq = torch.from_numpy(calls_seq_np).to(device)
-        disc_seq = torch.from_numpy(disc_seq_np).to(device)
-        gsv_t = torch.from_numpy(gsv_np).to(device)
-        yb_all = torch.from_numpy(labels_np).to(device)
-        # Legality masks (required)
+        # Keep full tensors on CPU to avoid exhausting GPU memory; move per-batch below
+        hand_seq_all = torch.from_numpy(hand_seq_np)  # (N, embed, 12) CPU
+        calls_seq_all = torch.from_numpy(calls_seq_np)  # (N, embed, 36) CPU
+        disc_seq_all = torch.from_numpy(disc_seq_np)  # (N, embed, 4*K) CPU
+        gsv_all = torch.from_numpy(gsv_np)  # (N, GSV) CPU
+        yb_all = torch.from_numpy(labels_np)  # (N,) int64 CPU
+        # Legality masks (required) on CPU
         try:
-            lm_all = torch.from_numpy(legality_masks.astype(bool)).to(device)
-            if lm_all.ndim != 2 or lm_all.shape[0] != hand_seq.shape[0] or lm_all.shape[1] != self._owner._num_actions:
+            lm_all_cpu = torch.from_numpy(legality_masks.astype(bool))
+            if lm_all_cpu.ndim != 2 or lm_all_cpu.shape[0] != hand_seq_all.shape[0] or lm_all_cpu.shape[1] != self._owner._num_actions:
                 raise ValueError("legality_masks must have shape (N, num_actions)")
             # Assert every sample has at least one legal action
-            per_row_any = lm_all.any(dim=1)
+            per_row_any = lm_all_cpu.any(dim=1)
             if not bool(per_row_any.all().item()):
-                # Collect a few offending indices for debugging
                 bad_idx = torch.nonzero(~per_row_any, as_tuple=False).view(-1).tolist()
                 preview = bad_idx[:10]
                 raise AssertionError(
@@ -496,14 +498,14 @@ class _KerasLikeWrapper:
         except Exception as e:
             raise ValueError(f"Invalid legality_masks: {e}")
         
-        # Use RAW rewards for training (policy gradient) and for categorization/metrics
-        orig_rewards_all = torch.from_numpy(original_rewards).to(device)
+        # Use RAW rewards for training (policy gradient) and for categorization/metrics (CPU)
+        orig_rewards_all = torch.from_numpy(original_rewards)
         wb_all = orig_rewards_all
 
         # Setup optimizer with optional learning rate scheduling
-        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=float(learning_rate))
+        optimizer = torch.optim.Adam(self._owner._net.parameters(), lr=float(learning_rate), weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=2, verbose=False
+            optimizer, mode='max', factor=0.5, patience=10, verbose=False
         )
         
         def policy_gradient_loss(logits: torch.Tensor, actions: torch.Tensor, 
@@ -538,7 +540,7 @@ class _KerasLikeWrapper:
 
         from tqdm import tqdm  # type: ignore
 
-        num_samples = hand_seq.shape[0]
+        num_samples = hand_seq_all.shape[0]
         bs = max(1, min(batch_size, num_samples))
 
         # Tracking metrics
@@ -562,9 +564,10 @@ class _KerasLikeWrapper:
                     val_weights = val_sample_weight.astype(np.float32)
         
         for ep in range(max(1, epochs)):
-            indices = torch.arange(num_samples, device=device)
+            # Keep indices on CPU; we'll index CPU tensors then move slices to device
+            indices = torch.arange(num_samples)
             if shuffle:
-                indices = indices[torch.randperm(num_samples, device=device)]
+                indices = indices[torch.randperm(num_samples)]
             
             total_batches = (num_samples + bs - 1) // bs
             
@@ -591,26 +594,31 @@ class _KerasLikeWrapper:
             for start in range(0, num_samples, bs):
                 end = min(num_samples, start + bs)
                 idx = indices[start:end]
-                # slices prepared below for each input tensor
-                yb = yb_all.index_select(0, idx)
-                
+                # Prepare per-batch CPU slices, then move to active device
+                yb = yb_all.index_select(0, idx).to(device)
                 # Use RAW rewards for training (policy gradient)
-                wb = wb_all.index_select(0, idx)
-                orig_rewards = orig_rewards_all.index_select(0, idx)
+                wb = wb_all.index_select(0, idx).to(device)
+                orig_rewards = orig_rewards_all.index_select(0, idx).to(device)
                 
                 optimizer.zero_grad(set_to_none=True)
                 
-                # Forward pass
+                # Forward pass with only batch moved to device
                 logits = self._owner._net(
-                    hand_seq.index_select(0, idx),
-                    calls_seq.index_select(0, idx),
-                    disc_seq.index_select(0, idx),
-                    gsv_t.index_select(0, idx),
+                    hand_seq_all.index_select(0, idx).to(device),
+                    calls_seq_all.index_select(0, idx).to(device),
+                    disc_seq_all.index_select(0, idx).to(device),
+                    gsv_all.index_select(0, idx).to(device),
                 )
                 # Apply legality mask to logits
-                lm = lm_all.index_select(0, idx)
+                lm = lm_all_cpu.index_select(0, idx).to(device)
+                # Before masking, penalize high logits on illegal actions (not strictly necessary in this setup)
+                illegal_penalty = 0.1 * (logits * (~lm).float()).pow(2).sum(dim=-1).mean()
+
+                # Then apply normal masking
                 logits = logits.masked_fill(~lm, -1e9)
-                loss, entropy, action_probs = policy_gradient_loss(logits, yb, wb)
+                legal_loss, entropy, action_probs = policy_gradient_loss(logits, yb, wb)
+
+                loss = legal_loss + illegal_penalty
                 
                 # Backward pass with gradient clipping
                 loss.backward()
@@ -629,11 +637,9 @@ class _KerasLikeWrapper:
                     # CE/PG loss components on train
                     neg_logp = -torch.log(action_probs + 1e-8)
                     ce_sum += neg_logp.sum().item()
-                    
-                    # CRITICAL FIX: Use ORIGINAL rewards for categorization, not normalized advantages
 
-                    # Win actions (reward = 1)
-                    win_mask = (orig_rewards == 1.0)
+                    # Win actions (reward = configured WIN_REWARD)
+                    win_mask = (orig_rewards == WIN_REWARD)
                     if win_mask.any():
                         win_probs.extend(action_probs[win_mask].cpu().numpy())
                         win_correct += eq[win_mask].sum().item()
@@ -644,13 +650,13 @@ class _KerasLikeWrapper:
                     # PG loss term: -(reward * log pi(a|s))
                     pg_sum += (-(orig_rewards * torch.log(action_probs + 1e-8))).sum().item()
 
-                    # Lose actions (reward = -1)
-                    lose_mask = (orig_rewards == -1.0)
+                    # Lose actions (reward = configured LOSS_REWARD)
+                    lose_mask = (orig_rewards == LOSS_REWARD)
                     if lose_mask.any():
                         lose_probs.extend(action_probs[lose_mask].cpu().numpy())
 
-                    # Neutral actions (reward = 0)
-                    neutral_mask = (orig_rewards == 0.0)
+                    # Neutral actions (reward = configured NEUTRAL_REWARD)
+                    neutral_mask = (orig_rewards == NEUTRAL_REWARD)
                     if neutral_mask.any():
                         neutral_probs.extend(action_probs[neutral_mask].cpu().numpy())
                 
@@ -694,8 +700,9 @@ class _KerasLikeWrapper:
             history['lose_count'].append(lose_count)
             history['neutral_count'].append(neutral_count)
             
-            # Update learning rate based on performance
-            scheduler.step(performance)
+            # Select metric for LR scheduling and early stopping
+            metric_to_use = performance
+            val_performance: Optional[float] = None
             
             if verbose:
                 if bar is not None:
@@ -710,57 +717,7 @@ class _KerasLikeWrapper:
                 print(f"  [TRAIN] CE: {train_ce:.4f} | PG: {train_pg:.4f}")
                 print(f"  [TRAIN] Sample Counts -> Win: {win_count} | Lose: {lose_count} | Neutral: {neutral_count}")
                 print(f"  [TRAIN] Policy Probs -> Win: {avg_win_prob:.4f} | Lose: {avg_lose_prob:.4f} | Neutral: {avg_neutral_prob:.4f}")
-                # Top-10 actions by average probability over winning samples
-                if win_samples > 0:
-                    avg_action_probs_win = (win_action_prob_sum / max(1, int(win_samples))).astype(np.float64)
-                    top_idx = np.argsort(avg_action_probs_win)[-10:][::-1]
-                    try:
-                        from .pure_policy_dataset import get_action_labels  # type: ignore
-                        labels = get_action_labels()
-                    except Exception:
-                        labels = [str(i) for i in range(len(avg_action_probs_win))]
 
-                    # Make labels human readable: translate discard_i and pon_i to tile strings
-                    def _pretty(label: str) -> str:
-                        if label.startswith('discard_'):
-                            try:
-                                ti = int(label.split('_', 1)[1])
-                                rank = (ti // 2) + 1
-                                suit = 'p' if (ti % 2) == 0 else 's'
-                                return f'discard_{rank}{suit}'
-                            except Exception:
-                                return label
-                        if label.startswith('pon_'):
-                            try:
-                                ti = int(label.split('_', 1)[1])
-                                rank = (ti // 2) + 1
-                                suit = 'p' if (ti % 2) == 0 else 's'
-                                return f'pon_{rank}{suit}'
-                            except Exception:
-                                return label
-                        if label.startswith('chi_'):
-                            # chi_{tileIdx}_{variant}
-                            try:
-                                _, ti, var = label.split('_', 2)
-                                ti = int(ti)
-                                rank = (ti // 2) + 1
-                                suit = 'p' if (ti % 2) == 0 else 's'
-                                return f'chi_{rank}{suit}_{var}'
-                            except Exception:
-                                return label
-                        return label
-
-                    print("  [TRAIN] (wins) top actions:")
-                    for rank_i, ai in enumerate(top_idx, 1):
-                        print(f"    {rank_i}. {_pretty(labels[ai])}: {avg_action_probs_win[ai]:.4f}")
-                    # Also report ron and tsumo average probabilities over wins
-                    try:
-                        ron_idx = labels.index('ron')
-                        tsumo_idx = labels.index('tsumo')
-                    except ValueError:
-                        ron_idx, tsumo_idx = 1, 2  # Fallback to standard indices
-                    print(f"  [TRAIN] (wins) ron: {avg_action_probs_win[ron_idx]:.4f} | tsumo: {avg_action_probs_win[tsumo_idx]:.4f}")
-                
                 if avg_win_prob > 0 and avg_lose_prob > 0:
                     ratio = avg_win_prob / avg_lose_prob
                     print(f"  [TRAIN] Win/Lose Ratio: {ratio:.2f}x | Performance: {performance:.4f}")
@@ -769,54 +726,88 @@ class _KerasLikeWrapper:
                 
                 print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-                # Validation metrics per epoch if provided
-                if val_labels is not None:
-                    with torch.no_grad():
-                        vh, vd, vc, vg = val_x_list
-                        h_np, c_np, d_np, g_np = self._precompute_cnn(vh, vd, vc, vg)
+            # Validation metrics per epoch if provided (compute regardless of verbosity)
+            if val_labels is not None:
+                # Validation in batches to avoid GPU OOM
+                with torch.no_grad():
+                    vh, vd, vc, vg = val_x_list
+                    h_np, c_np, d_np, g_np = self._precompute_cnn(vh, vd, vc, vg)
+                    h_all = torch.from_numpy(h_np)
+                    c_all = torch.from_numpy(c_np)
+                    d_all = torch.from_numpy(d_np)
+                    g_all = torch.from_numpy(g_np)
+                    labels_all = torch.from_numpy(val_labels)
+                    w_all = torch.from_numpy(val_weights) if val_weights is not None else None
+                    lm_val_all = torch.from_numpy(val_legality_masks.astype(bool)) if val_legality_masks is not None else None
+
+                    V = h_all.shape[0]
+                    v_bs = max(1, min(bs, V))
+                    ce_sum_val = 0.0
+                    pg_sum_val = 0.0
+                    total_v = 0
+                    # category accumulators
+                    win_prob_sum = 0.0
+                    lose_prob_sum = 0.0
+                    neutral_prob_sum = 0.0
+                    win_cnt = 0
+                    lose_cnt = 0
+                    neutral_cnt = 0
+
+                    for v_start in range(0, V, v_bs):
+                        v_end = min(V, v_start + v_bs)
+                        sl = slice(v_start, v_end)
                         logits_val = self._owner._net(
-                            torch.from_numpy(h_np).to(device),
-                            torch.from_numpy(c_np).to(device),
-                            torch.from_numpy(d_np).to(device),
-                            torch.from_numpy(g_np).to(device),
+                            h_all[sl].to(device),
+                            c_all[sl].to(device),
+                            d_all[sl].to(device),
+                            g_all[sl].to(device),
                         )
-                        # Apply validation legality mask if provided
-                        if val_legality_masks is not None:
-                            try:
-                                lm_val = torch.from_numpy(val_legality_masks.astype(bool)).to(logits_val.device)
-                                if lm_val.shape == logits_val.shape:
-                                    logits_val = logits_val.masked_fill(~lm_val, -1e9)
-                                elif lm_val.ndim == 2 and lm_val.shape[1] == logits_val.shape[1]:
-                                    logits_val = logits_val.masked_fill(~lm_val, -1e9)
-                            except Exception:
-                                pass
+                        if lm_val_all is not None:
+                            lm_b = lm_val_all[sl].to(logits_val.device)
+                            logits_val = logits_val.masked_fill(~lm_b, -1e9)
                         log_probs_val = F.log_softmax(logits_val, dim=-1)
-                        # CE and chosen action probabilities
-                        idx = torch.arange(len(val_labels), device=logits_val.device)
-                        labels_t = torch.from_numpy(val_labels).to(logits_val.device)
-                        true_logp_val = log_probs_val[idx, labels_t]
-                        ce_val = float((-true_logp_val).mean().cpu().item()) if val_labels.size > 0 else 0.0
-                        action_prob_val = torch.exp(true_logp_val).cpu().numpy()
-                        # PG
-                        if val_weights is not None and val_weights.size == val_labels.size:
-                            vw = torch.from_numpy(val_weights).to(logits_val.device)
-                            pg_val = float((-(vw * true_logp_val)).mean().cpu().item())
-                            win_mask_val = (vw == 1.0).cpu().numpy()
-                            lose_mask_val = (vw == -1.0).cpu().numpy()
-                            neutral_mask_val = (vw == 0.0).cpu().numpy()
+                        labels_b = labels_all[sl].to(logits_val.device)
+                        idx_b = torch.arange(labels_b.shape[0], device=logits_val.device)
+                        true_logp_val = log_probs_val[idx_b, labels_b]
+                        ce_sum_val += float((-true_logp_val).sum().cpu().item())
+                        action_prob_b = torch.exp(true_logp_val).cpu().numpy()
+                        total_v += labels_b.shape[0]
+                        if w_all is not None and w_all.numel() == labels_all.numel():
+                            vw_b = w_all[sl].to(logits_val.device)
+                            pg_sum_val += float((-(vw_b * true_logp_val)).sum().cpu().item())
+                            win_mask_b = (vw_b == WIN_REWARD).cpu().numpy()
+                            lose_mask_b = (vw_b == LOSS_REWARD).cpu().numpy()
+                            neutral_mask_b = (vw_b == NEUTRAL_REWARD).cpu().numpy()
                         else:
-                            pg_val = ce_val
-                            win_mask_val = np.zeros_like(val_labels, dtype=bool)
-                            lose_mask_val = np.zeros_like(val_labels, dtype=bool)
-                            neutral_mask_val = np.zeros_like(val_labels, dtype=bool)
-                    # Aggregate holdout policy probs and counts
-                    ho_win_prob = float(np.mean(action_prob_val[win_mask_val])) if np.any(win_mask_val) else 0.0
-                    ho_lose_prob = float(np.mean(action_prob_val[lose_mask_val])) if np.any(lose_mask_val) else 0.0
-                    ho_neutral_prob = float(np.mean(action_prob_val[neutral_mask_val])) if np.any(neutral_mask_val) else 0.0
-                    ho_win_count = int(np.sum(win_mask_val))
-                    ho_lose_count = int(np.sum(lose_mask_val))
-                    ho_neutral_count = int(np.sum(neutral_mask_val))
+                            vw_b = None
+                            win_mask_b = np.zeros(action_prob_b.shape[0], dtype=bool)
+                            lose_mask_b = np.zeros(action_prob_b.shape[0], dtype=bool)
+                            neutral_mask_b = np.zeros(action_prob_b.shape[0], dtype=bool)
+                        # accumulate category sums
+                        if np.any(win_mask_b):
+                            win_prob_sum += float(np.sum(action_prob_b[win_mask_b]))
+                            win_cnt += int(np.sum(win_mask_b))
+                        if np.any(lose_mask_b):
+                            lose_prob_sum += float(np.sum(action_prob_b[lose_mask_b]))
+                            lose_cnt += int(np.sum(lose_mask_b))
+                        if np.any(neutral_mask_b):
+                            neutral_prob_sum += float(np.sum(action_prob_b[neutral_mask_b]))
+                            neutral_cnt += int(np.sum(neutral_mask_b))
+
+                    ce_val = (ce_sum_val / max(1, total_v)) if total_v > 0 else 0.0
+                    if val_weights is not None and val_weights.size == val_labels.size:
+                        pg_val = (pg_sum_val / max(1, total_v)) if total_v > 0 else ce_val
+                    else:
+                        pg_val = ce_val
+                    ho_win_prob = (win_prob_sum / max(1, win_cnt)) if win_cnt > 0 else 0.0
+                    ho_lose_prob = (lose_prob_sum / max(1, lose_cnt)) if lose_cnt > 0 else 0.0
+                    ho_neutral_prob = (neutral_prob_sum / max(1, neutral_cnt)) if neutral_cnt > 0 else 0.0
+                    ho_win_count = win_cnt
+                    ho_lose_count = lose_cnt
+                    ho_neutral_count = neutral_cnt
                     ho_performance = ho_win_prob - ho_lose_prob
+                    val_performance = float(ho_performance)
+                if verbose:
                     # Print holdout metrics aligned with train
                     print(f"  [HOLDOUT] CE: {ce_val:.4f} | PG: {pg_val:.4f}")
                     print(f"  [HOLDOUT] Sample Counts -> Win: {ho_win_count} | Lose: {ho_lose_count} | Neutral: {ho_neutral_count}")
@@ -826,9 +817,15 @@ class _KerasLikeWrapper:
                     elif ho_lose_prob == 0:
                         print(f"  [HOLDOUT] WARNING: No lose samples found in HOLDOUT! Check data distribution.")
             
-            # Early stopping based on performance metric (avg_win_prob - avg_lose_prob)
-            if performance > best_metric:
-                best_metric = performance
+            # After (optional) validation, choose metric for LR schedule and early stopping
+            if val_performance is not None:
+                metric_to_use = val_performance
+            # Update learning rate scheduler on chosen metric
+            scheduler.step(metric_to_use)
+
+            # Early stopping based on chosen metric (validation if available)
+            if metric_to_use > best_metric:
+                best_metric = metric_to_use
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
@@ -865,6 +862,8 @@ class _KerasLikeWrapper:
                 torch.from_numpy(disc_seq_np).to(self._owner._device),
                 torch.from_numpy(gsv_np).to(self._owner._device),
             )
-            probs = F.softmax(logits, dim=-1).cpu().numpy()
+            # Apply temperature to logits before softmax when temperature > 0
+            temp = max(1e-6, float(self._owner.temperature))
+            probs = F.softmax(logits / temp, dim=-1).cpu().numpy()
         return probs
 

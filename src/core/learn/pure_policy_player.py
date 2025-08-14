@@ -18,11 +18,9 @@ from ..game import (
     Reaction,
     PassCall,
 )
+from ..game import SimpleJong  # for IllegalMoveException
 # Optional import to avoid hard dependency on torch during lightweight tests
-try:  # pragma: no cover - exercised indirectly in tests
-    from .pure_policy import PurePolicyNetwork  # type: ignore
-except Exception:  # pragma: no cover
-    PurePolicyNetwork = Any  # type: ignore
+from .pure_policy import PurePolicyNetwork  # type: ignore
 from .pure_policy_dataset import (
     get_action_index_map,
     serialize_state,
@@ -55,7 +53,11 @@ class PurePolicyPlayer(Player):
         idx = extract_indexed_state(sd)
         hand_idx = idx['hand_idx']
         disc_idx = idx['disc_idx']
-        called_idx = idx.get('called_sets_idx', np.zeros((4, 4, 3), dtype=np.int32))
+        try:
+            from ..constants import MAX_CALLED_SETS_PER_PLAYER as _MCSP
+        except Exception:
+            _MCSP = 3
+        called_idx = idx.get('called_sets_idx', np.zeros((4, _MCSP, 3), dtype=np.int32))
         game_state = idx['game_state']
         return hand_idx, disc_idx, called_idx, game_state
 
@@ -126,7 +128,10 @@ class PurePolicyPlayer(Player):
     def play(self, game_state: GamePerspective):
         legal = game_state.legal_moves()
         chosen = self._select_best_legal(game_state, legal)
-        return chosen if chosen is not None else (legal[0] if legal else Discard(game_state.player_hand[0]))
+        move = chosen if chosen is not None else (legal[0] if legal else Discard(game_state.player_hand[0]))
+        if not game_state.is_legal(move):
+            raise SimpleJong.IllegalMoveException("PurePolicyPlayer produced illegal action")
+        return move
 
     def choose_reaction(self, game_state: GamePerspective, options: Dict[str, List[List[Tile]]]) -> Reaction:
         # Build legal moves from options
@@ -141,14 +146,19 @@ class PurePolicyPlayer(Player):
         # Fallback priority if network yields no signal
         if chosen is None:
             if game_state.can_ron():
-                return Ron()
-            if options.get('pon'):
-                return Pon(options['pon'][0])
-            if options.get('chi'):
-                return Chi(options['chi'][0])
-            # Must return a Reaction; default to Pass
-            return PassCall()
-        return chosen
+                move = Ron()
+            elif options.get('pon'):
+                move = Pon(options['pon'][0])
+            elif options.get('chi'):
+                move = Chi(options['chi'][0])
+            else:
+                # Must return a Reaction; default to Pass
+                move = PassCall()
+        else:
+            move = chosen
+        if not game_state.is_legal(move):
+            raise SimpleJong.IllegalMoveException("PurePolicyPlayer produced illegal reaction")
+        return move
 
     # --- Exposed inference path for integration consistency checks ---
     def predict_policy_probs(self, gs: GamePerspective) -> np.ndarray:
@@ -166,5 +176,6 @@ class PurePolicyPlayer(Player):
             game_state[None, :]
         ], verbose=0)[0]
         return probs
+
 
 

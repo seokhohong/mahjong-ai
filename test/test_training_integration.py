@@ -162,8 +162,8 @@ class TestTrainingIntegration(unittest.TestCase):
                         print(f"[warn] failed to print divergence details: {e}")
 
                 # Now let the engine perform the actual turn, which may alter current_player_idx
-                winner = game.play_turn()
-                if winner is not None:
+                game.play_turn()
+                if game.is_game_over():
                     break
 
         accuracy = (copied_decisions / max(1, total_decisions))
