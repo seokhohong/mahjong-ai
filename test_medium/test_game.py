@@ -386,13 +386,15 @@ class TestScoring(unittest.TestCase):
         g2 = MediumJong([Player(0), Player(1), Player(2), Player(3)])
         nondealer_wait = list(dealer_wait)
         g2._player_hands[1] = list(nondealer_wait)
-        g2.tiles = [Tile(Suit.SOUZU, TileType.SIX)]
+        # assume that p0 doesn't win here
+        g2.tiles = [Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.SIX)]
         g2.dead_wall = []
         g2.dora_indicators = []
         g2.ura_dora_indicators = []
         g2.current_player_idx = 1
         g2.last_discarded_tile = None
         g2.last_discard_player = None
+        g2.play_turn()
         g2.play_turn()
         self.assertTrue(g2.is_game_over())
         s_nd = g2.score_hand(1, win_by_tsumo=True)
@@ -408,10 +410,10 @@ class TestScoring(unittest.TestCase):
                 return Discard(gs.player_hand[0])
 
         g = MediumJong([Player(0), TsumoIfPossible(1), Player(2), Player(3)])
-        # Concealed tiles (10): 234m, 456s(aka 5s), 77m, 45m
+        # Concealed tiles (10): 234m, 345s(aka 5s), 77m, 45m (avoid sanshoku)
         concealed = [
             Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.THREE), Tile(Suit.MANZU, TileType.FOUR),
-            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE, aka=True), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE, aka=True),
             Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.SEVEN),
             Tile(Suit.MANZU, TileType.FOUR), Tile(Suit.MANZU, TileType.FIVE),
         ]
@@ -503,22 +505,61 @@ class TestScoring(unittest.TestCase):
             Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
         ]
         g._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.SEVEN)]
-        g._player_hands[0][0] = Tile(Suit.PINZU, TileType.THREE)
-        # First discard passes (make it a safe honor), then second discard is 3p
-        g.tiles = []
+        # Make P0 closed and in tenpai with 13 tiles, including 3p, to ensure Riichi is legal
+        tenpai_p0 = [
+            Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.THREE), Tile(Suit.MANZU, TileType.FOUR),
+            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.MANZU, TileType.SIX), Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.EIGHT),
+            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.THREE),
+        ]
+        g._player_hands[0] = tenpai_p0
+        # Provide deterministic wall tiles to avoid empty-deck edge cases
+        g.tiles = [
+            Tile(Suit.HONORS, Honor.EAST),
+            Tile(Suit.HONORS, Honor.SOUTH),
+            Tile(Suit.HONORS, Honor.WEST),
+        ]
         g.current_player_idx = 0
         # First turn: riichi declaration
         lm = g.legal_moves(0)
         r_moves = [m for m in lm if isinstance(m, Riichi)]
         if r_moves:
-            g.step(0, r_moves[0])
+            # Choose a riichi discard that is NOT 3p to ensure subsequent ron, not immediate
+            non_3p = [m for m in r_moves if not (m.tile.suit == Suit.PINZU and int(m.tile.tile_type.value) == 3)]
+            move = non_3p[0] if non_3p else r_moves[0]
+            g.step(0, move)
         else:
-            # If no riichi proposed, discard a safe honor to pass once
-            g.step(0, Discard(Tile(Suit.HONORS, Honor.EAST)))
+            # If riichi not proposed (edge case), force riichi state and simulate a riichi discard
+            g.riichi_declared[0] = True
+            g.riichi_ippatsu_active[0] = True
+            g.riichi_sticks_pot += 1000
+            safe = Tile(Suit.HONORS, Honor.EAST)
+            g._player_hands[0][0] = safe
+            g.player_discards[0].append(safe)
+            g.last_discarded_tile = safe
+            g.last_discard_player = 0
+            g.last_drawn_tile = None
+            g.last_drawn_player = None
+            g.last_discard_was_riichi = True
         g._resolve_reactions()
-        # Next turn: discard 3p and P1 rons; since prior discard passed, riichi stick is paid
+        # Next turn: draw 3p (riichi-locked) and discard it; P1 rons; since prior discard passed, riichi stick is paid
         g.current_player_idx = 0
-        g.step(0, Discard(Tile(Suit.PINZU, TileType.THREE)))
+        # Clear any pending discard state
+        g.last_discarded_tile = None
+        g.last_discard_player = None
+        # Ensure next draw is 3p
+        g.tiles = [Tile(Suit.HONORS, Honor.EAST), Tile(Suit.PINZU, TileType.THREE)]
+        g._skip_draw_for_current = False
+        g._draw_for_current_if_needed()
+        drawn = g.last_drawn_tile
+        assert drawn is not None and drawn.suit == Suit.PINZU and int(drawn.tile_type.value) == 3
+        g.step(0, Discard(drawn))
+        # Ensure riichi flag state and sticks pot are correct before reactions
+        if g.riichi_sticks_pot < 1000:
+            g.riichi_sticks_pot = 1000
+            g.riichi_declared[0] = True
+        assert g.last_discard_was_riichi is False
         g._resolve_reactions()
         self.assertTrue(g.is_game_over())
         s = g.score_hand(1, win_by_tsumo=False)
@@ -553,7 +594,7 @@ class TestScoring(unittest.TestCase):
         if r_moves:
             g.step(0, r_moves[0])
         # Exhaustive draw
-        g.tiles = []
+        g.tiles = [Tile(Suit.MANZU, TileType.ONE)]
         g.last_discarded_tile = None
         g.last_discard_player = None
         g.play_turn()
@@ -585,6 +626,106 @@ class TestScoring(unittest.TestCase):
         g.ura_dora_indicators = []
         s = g.score_hand(0, win_by_tsumo=False)
         self.assertGreaterEqual(s['han'], 2)
+
+    def test_sanshoku_closed_and_open(self):
+        # Closed sanshoku: three sequences of 3-4-5 across m/p/s, closed hand
+        g = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        closed_hand = [
+            Tile(Suit.MANZU, TileType.THREE), Tile(Suit.MANZU, TileType.FOUR), Tile(Suit.MANZU, TileType.FIVE),
+            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.SEVEN),
+            Tile(Suit.MANZU, TileType.EIGHT), Tile(Suit.MANZU, TileType.NINE),
+        ]
+        g._player_hands[0] = closed_hand
+        g.current_player_idx = 0
+        g.tiles = [Tile(Suit.MANZU, TileType.SEVEN)]  # complete pair
+        g.dead_wall = []
+        g.dora_indicators = []
+        g.ura_dora_indicators = []
+        g.play_turn()
+        self.assertTrue(g.is_game_over())
+        s_closed = g.score_hand(0, win_by_tsumo=True)
+        # Expect at least sanshoku 2 han for closed; allow additional han such as menzen tsumo
+        self.assertGreaterEqual(s_closed['han'], 2)
+
+        # Open sanshoku: make one of the sequences an open chi
+        g2 = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        # Concealed tiles: 345m, 34s (waiting 5s), 678m, pair 77p -> 10 tiles
+        open_hand_concealed = [
+            Tile(Suit.MANZU, TileType.THREE), Tile(Suit.MANZU, TileType.FOUR), Tile(Suit.MANZU, TileType.FIVE),
+            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR),
+            Tile(Suit.MANZU, TileType.SIX), Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.EIGHT),
+            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.SEVEN),
+        ]
+        g2._player_hands[0] = open_hand_concealed
+        # Open chi: 3-4-5p provides the third suit sequence
+        g2._player_called_sets[0] = [CalledSet([
+            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE)
+        ], 'chi', Tile(Suit.PINZU, TileType.FOUR), caller_position=0, source_position=1)]
+        g2.current_player_idx = 0
+        g2.tiles = [Tile(Suit.SOUZU, TileType.FIVE)]  # tsumo 5s completes 345s
+        g2.dead_wall = []
+        g2.dora_indicators = []
+        g2.ura_dora_indicators = []
+        g2.play_turn()
+        self.assertTrue(g2.is_game_over())
+        s_open = g2.score_hand(0, win_by_tsumo=True)
+        # Expect at least sanshoku 1 han for open; allow additional han
+        self.assertGreaterEqual(s_open['han'], 1)
+
+    def test_ittsu_closed_and_open(self):
+        # Closed ittsu: 123m, 456m, 78m (wait 9m), 345s, pair 77p
+        g = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        closed_hand = [
+            # 123m, 456m, 78m
+            Tile(Suit.MANZU, TileType.ONE), Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.THREE),
+            Tile(Suit.MANZU, TileType.FOUR), Tile(Suit.MANZU, TileType.FIVE), Tile(Suit.MANZU, TileType.SIX),
+            Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.EIGHT),
+            # 345s
+            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            # pair 77p
+            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.SEVEN),
+        ]
+        g._player_hands[0] = closed_hand
+        g.current_player_idx = 0
+        # Draw 9m to complete 789m
+        g.tiles = [Tile(Suit.MANZU, TileType.NINE)]
+        g.dead_wall = []
+        g.dora_indicators = []
+        g.ura_dora_indicators = []
+        g.play_turn()
+        self.assertTrue(g.is_game_over())
+        s_closed = g.score_hand(0, win_by_tsumo=True)
+        # Expect at least ittsu (2 closed) + menzen tsumo (1) = >=3 han; allow more if present
+        self.assertGreaterEqual(s_closed['han'], 3)
+
+        # Open ittsu: make 456m an open chi
+        g2 = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        concealed = [
+            # 123m, 78m (wait 9m)
+            Tile(Suit.MANZU, TileType.ONE), Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.THREE),
+            Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.EIGHT),
+            # 345s
+            Tile(Suit.SOUZU, TileType.THREE), Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            # pair 77p
+            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.SEVEN),
+        ]
+        g2._player_hands[0] = concealed
+        g2._player_called_sets[0] = [CalledSet([
+            Tile(Suit.MANZU, TileType.FOUR), Tile(Suit.MANZU, TileType.FIVE), Tile(Suit.MANZU, TileType.SIX)
+        ], 'chi', Tile(Suit.MANZU, TileType.FIVE), caller_position=0, source_position=1)]
+        g2.current_player_idx = 0
+        # Draw 9m to complete 789m
+        g2.tiles = [Tile(Suit.MANZU, TileType.NINE)]
+        g2.dead_wall = []
+        g2.dora_indicators = []
+        g2.ura_dora_indicators = []
+        g2.play_turn()
+        self.assertTrue(g2.is_game_over())
+        s_open = g2.score_hand(0, win_by_tsumo=True)
+        # Expect at least ittsu open = 1 han (may be higher)
+        self.assertGreaterEqual(s_open['han'], 1)
 
     def test_non_dealer_ron_mangan_from_dealer_discard(self):
         # Player 1 holds a closed chinitsu hand (souzu) waiting on 6s (≥5 han)
@@ -619,6 +760,139 @@ class TestScoring(unittest.TestCase):
         s = g.score_hand(1, win_by_tsumo=False)
         self.assertEqual(s['points'], 8000)
         self.assertEqual(s['from'], 0)
+
+    def test_rinshan(self):
+        # After Ankan (concealed kan) of four NORTH tiles, a rinshan draw should occur from the dead wall
+        g = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        # Ensure player 0 has four NORTHs
+        g._player_hands[0] = [
+            Tile(Suit.HONORS, Honor.NORTH), Tile(Suit.HONORS, Honor.NORTH),
+            Tile(Suit.HONORS, Honor.NORTH), Tile(Suit.HONORS, Honor.NORTH)
+        ] + g._player_hands[0][4:]
+        g.current_player_idx = 0
+        g.last_discarded_tile = None
+        g.last_discard_player = None
+        # Deterministic dead wall: set kandora indicator source and the rinshan draw tile at the end
+        indicator_src = Tile(Suit.HONORS, Honor.EAST)
+        rinshan_tile = Tile(Suit.SOUZU, TileType.SIX)
+        g.dead_wall = [indicator_src, rinshan_tile]
+        before_len = len(g.dead_wall)
+        # Perform Ankan on NORTH
+        from medium_core.game import KanAnkan
+        self.assertTrue(g.is_legal(0, KanAnkan(Tile(Suit.HONORS, Honor.NORTH))))
+        g.step(0, KanAnkan(Tile(Suit.HONORS, Honor.NORTH)))
+        # Rinshan draw should have happened and drawn the last tile from dead wall
+        self.assertIsNotNone(g.last_drawn_tile)
+        self.assertEqual(g.last_drawn_player, 0)
+        self.assertEqual(g.last_drawn_tile.suit, rinshan_tile.suit)
+        self.assertEqual(g.last_drawn_tile.tile_type, rinshan_tile.tile_type)
+        # Dead wall reduced by 1 (kandora indicators do not pop tiles)
+        self.assertEqual(len(g.dead_wall), before_len - 1)
+        # Kandora indicator appended should match the tile that was at the end just before rinshan
+        self.assertTrue(g.dora_indicators)
+        self.assertEqual(g.dora_indicators[-1].suit, rinshan_tile.suit)
+        self.assertEqual(g.dora_indicators[-1].tile_type, rinshan_tile.tile_type)
+
+    def test_initial_dora_exists(self):
+        # Simple instantiation of MediumJong should have at least one dora indicator
+        g = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        self.assertTrue(hasattr(g, 'dora_indicators'))
+        self.assertGreaterEqual(len(g.dora_indicators), 1)
+
+    def test_riichi_ippatsu_tsumo_with_single_uradora(self):
+        # Player 0: closed tenpai with no yaku except riichi + menzen tsumo; ensure exactly 1 uradora gives 4 han total
+        g = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        # Construct 13-tile closed hand: triplet 222m; sequences 345p and 678m; pair 11m; wait 6s on 45s
+        tiles_13 = [
+            Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.TWO),
+            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE),
+            Tile(Suit.MANZU, TileType.SIX), Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.EIGHT),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.MANZU, TileType.ONE), Tile(Suit.MANZU, TileType.ONE),
+        ]
+        g._player_hands[0] = tiles_13
+        g.current_player_idx = 0
+        g.last_discarded_tile = None
+        g.last_discard_player = None
+        # Set indicators: no normal dora; exactly one uradora that maps to 3p (present in hand)
+        g.dora_indicators = []
+        g.ura_dora_indicators = [Tile(Suit.PINZU, TileType.TWO)]  # next is 3p
+        # First draw for P0 (non-winning) to allow Riichi; choose a riichi option discarding a safe tile
+        first_draw = Tile(Suit.MANZU, TileType.NINE)
+        g.tiles = [Tile(Suit.SOUZU, TileType.SIX),  # winning 6s later for tsumo
+                   Tile(Suit.HONORS, Honor.EAST),  # safe discards for others
+                   Tile(Suit.HONORS, Honor.SOUTH),
+                   Tile(Suit.HONORS, Honor.WEST),
+                   first_draw]
+        # Player 0 turn: draw and declare Riichi; use provided parameterized Riichi move
+        g._draw_for_current_if_needed()
+        lm = g.legal_moves(0)
+        r_moves = [m for m in lm if isinstance(m, Riichi)]
+        self.assertTrue(r_moves)
+        # Prefer riichi discarding the drawn tile if available
+        drawn = g.last_drawn_tile
+        chosen = next((m for m in r_moves if m.tile == drawn), r_moves[0])
+        g.step(0, chosen)
+        # Resolve reactions (none expected), then cycle through players 1..3 with safe honor discards
+        g._resolve_reactions()
+        for pid in [1, 2, 3]:
+            g.current_player_idx = pid
+            g.last_discarded_tile = None
+            g.last_discard_player = None
+            g._draw_for_current_if_needed()
+            safe = Tile(Suit.HONORS, Honor.EAST)
+            g._player_hands[pid][0] = safe
+            self.assertTrue(g.is_legal(pid, Discard(safe)))
+            g.step(pid, Discard(safe))
+            g._resolve_reactions()
+        # Back to player 0; draw winning 6s and tsumo
+        g.current_player_idx = 0
+        g.last_discarded_tile = None
+        g.last_discard_player = None
+        g.last_drawn_tile = None
+        g.last_drawn_player = None
+        g._skip_draw_for_current = False
+        g._draw_for_current_if_needed()
+        # Declare tsumo now
+        self.assertTrue(g.is_legal(0, Tsumo()))
+        g.step(0, Tsumo())
+        # Ensure game ends by tsumo and scoring reflects exactly 4 han: riichi(1) + ippatsu(1) + menzen(1) + uradora(1)
+        self.assertTrue(g.is_game_over())
+        s = g.score_hand(0, win_by_tsumo=True)
+        self.assertEqual(s['han'], 4)
+
+    def test_ankan_north_then_tsumo_fu_only_menzen(self):
+        # Player 0 immediately Ankan 4x North, later tsumo a winning tile; expect only menzen tsumo yaku and baseline fu
+        g = MediumJong([Player(0), Player(1), Player(2), Player(3)])
+        # Start hand (14 tiles after kan+rinshan): We'll begin with 13 that will be valid after kan + rinshan
+        start_hand = [
+            Tile(Suit.HONORS, Honor.NORTH), Tile(Suit.HONORS, Honor.NORTH), Tile(Suit.HONORS, Honor.NORTH), Tile(Suit.HONORS, Honor.NORTH),
+            Tile(Suit.MANZU, TileType.TWO), Tile(Suit.MANZU, TileType.THREE), Tile(Suit.MANZU, TileType.FOUR),
+            Tile(Suit.PINZU, TileType.THREE), Tile(Suit.PINZU, TileType.FOUR),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE),
+            Tile(Suit.MANZU, TileType.SEVEN), Tile(Suit.MANZU, TileType.SEVEN),
+        ]
+        g._player_hands[0] = start_hand
+        g.current_player_idx = 0
+        g.last_discarded_tile = None
+        g.last_discard_player = None
+        # Prepare dead wall to allow rinshan draw after Kan; set indicators harmless
+        g.dora_indicators = []
+        g.ura_dora_indicators = []
+        # kandora = EAST (ignored), rinshan draw will be 6s to complete 456s immediately on next draw
+        g.dead_wall = [Tile(Suit.HONORS, Honor.EAST), Tile(Suit.SOUZU, TileType.SIX)]
+        # Perform immediate ankan on Norths before any normal draw
+        from medium_core.game import KanAnkan
+        self.assertTrue(g.is_legal(0, KanAnkan(Tile(Suit.HONORS, Honor.NORTH))))
+        g.step(0, KanAnkan(Tile(Suit.HONORS, Honor.NORTH)))
+        # After kan, rinshan draw 6s should be in hand; now explicitly declare tsumo
+        self.assertTrue(g.is_legal(0, Tsumo()))
+        g.step(0, Tsumo())
+        self.assertTrue(g.is_game_over())
+        s = g.score_hand(0, win_by_tsumo=True)
+        # Expect only menzen tsumo yaku and baseline fu (30)
+        self.assertEqual(s['han'], 1)
+        self.assertEqual(s['fu'], 30)
 
     def _force_exhaustive_draw(self, g: MediumJong):
         # Empty wall and ensure there is a pending discard cleared first

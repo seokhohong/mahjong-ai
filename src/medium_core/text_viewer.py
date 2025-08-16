@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import argparse
 
-from .game import (
+from src.medium_core.game import (
     MediumJong,
     Player,
     Tile,
@@ -21,13 +21,13 @@ from .game import (
     Ron,
     Discard,
     Suit,
-    Honor,
+    Honor, Riichi,
 )
-from .heuristics_player import MediumHeuristicsPlayer
+from src.medium_core.heuristics_player import MediumHeuristicsPlayer
 
 
 def _fmt_hand(tiles: List[Tile]) -> str:
-    sorted_tiles = sorted(tiles, key=lambda t: (t.suit.value, int(t.tile_type.value) if t.suit != Suit.HONORS else int(t.tile_type.value.value)))
+    sorted_tiles = sorted(tiles, key=lambda t: (t.suit.value, int(t.tile_type.value) if t.suit != Suit.HONORS else int(t.tile_type.value)))
     return '[' + ', '.join(str(t) for t in sorted_tiles) + ']'
 
 
@@ -39,59 +39,51 @@ def _fmt_called_sets(csets: List[Any]) -> str:
         try:
             tiles = getattr(cs, 'tiles', [])
             call_type = getattr(cs, 'call_type', '?')
-            sorted_tiles = sorted(tiles, key=lambda t: (t.suit.value, int(t.tile_type.value) if t.suit != Suit.HONORS else int(t.tile_type.value.value)))
+            sorted_tiles = sorted(tiles, key=lambda t: (t.suit.value, int(t.tile_type.value) if t.suit != Suit.HONORS else int(t.tile_type.value)))
             parts.append(f"{call_type}:[" + ', '.join(str(t) for t in sorted_tiles) + "]")
         except Exception:
             continue
     return '[' + '; '.join(parts) + ']'
 
 
-class TextViewerPlayer(Player):
-    def __init__(self, player_id: int, base: Player, lines: List[str]) -> None:
+class TextViewerPlayer(MediumHeuristicsPlayer):
+    def __init__(self, player_id: int, lines: List[str]) -> None:
         super().__init__(player_id)
-        self._base = base
         self._lines = lines
 
     def _log_turn(self, gs: Any, action: Any) -> None:
-        try:
-            newly = gs.newly_drawn_tile
-            newly_s = str(newly) if newly is not None else 'None'
-            action_s = type(action).__name__
-            try:
-                if isinstance(action, Discard):
-                    action_s = f"Discard {action.tile}"
-            except Exception:
-                pass
-            my_called = _fmt_called_sets(gs.called_sets.get(gs.player_id, []))
-            winds = f"Round {gs.round_wind.name} | Seat {gs.seat_winds[gs.player_id].name}"
-            dora = ','.join(str(t) for t in getattr(gs, 'dora_indicators', [])) if hasattr(gs, 'dora_indicators') else 'N/A'
-            self._lines.append(
-                f"Turn: P{self.player_id} | {winds} | Dora[{dora}] | Hand {_fmt_hand(gs.player_hand)} | Called {my_called} | Draw {newly_s} | Action {action_s}"
-            )
-        except Exception:
-            pass
+
+        newly = gs.newly_drawn_tile
+        newly_s = str(newly) if newly is not None else 'None'
+        action_s = type(action).__name__
+        if isinstance(action, Discard):
+            action_s = f"Discard {action.tile}"
+        elif isinstance(action, Riichi):
+            action_s = f"Riichi {action.tile}"
+        my_called = _fmt_called_sets(gs.called_sets.get(gs.player_id, []))
+        self._lines.append(
+            f"Turn: P{self.player_id} | Hand {_fmt_hand(gs.player_hand)} | Called {my_called} | Draw {newly_s} | Action {action_s}"
+        )
+
 
     def _log_reaction(self, gs: Any, options: Dict[str, List[List[Tile]]], action: Any) -> None:
-        try:
-            last = gs.last_discarded_tile
-            last_s = str(last) if last is not None else 'None'
-            pon_ct = len(options.get('pon', [])) if options else 0
-            chi_ct = len(options.get('chi', [])) if options else 0
-            action_s = type(action).__name__
-            my_called = _fmt_called_sets(gs.called_sets.get(gs.player_id, []))
-            self._lines.append(
-                f"Reaction: P{self.player_id} on {last_s} from P{gs.last_discard_player} | Called {my_called} | opts pon={pon_ct} chi={chi_ct} | Chosen {action_s}"
-            )
-        except Exception:
-            pass
+        last = gs.last_discarded_tile
+        last_s = str(last) if last is not None else 'None'
+        pon_ct = len(options.get('pon', [])) if options else 0
+        chi_ct = len(options.get('chi', [])) if options else 0
+        action_s = type(action).__name__
+        my_called = _fmt_called_sets(gs.called_sets.get(gs.player_id, []))
+        self._lines.append(
+            f"Reaction: P{self.player_id} on {last_s} from P{gs.last_discard_player} | Called {my_called} | opts pon={pon_ct} chi={chi_ct} | Chosen {action_s}"
+        )
 
     def play(self, game_state: Any) -> Any:
-        action = self._base.play(game_state)
+        action = super().play(game_state)
         self._log_turn(game_state, action)
         return action
 
     def choose_reaction(self, game_state: Any, options: Dict[str, List[List[Tile]]]) -> Any:
-        action = self._base.choose_reaction(game_state, options)
+        action = super().choose_reaction(game_state, options)
         self._log_reaction(game_state, options, action)
         return action
 
@@ -101,16 +93,19 @@ def simulate_with_text(tile_copies: int = 4, seed: int = 0) -> List[str]:
     if seed:
         random.seed(seed)
     lines: List[str] = []
-    base_players: List[Player] = [MediumHeuristicsPlayer(i) for i in range(4)]
-    players = [TextViewerPlayer(i, base_players[i], lines) for i in range(4)]
+    players = [TextViewerPlayer(i, lines) for i in range(4)]
     game = MediumJong(players, tile_copies=tile_copies)
 
-    # Run until game over (single round in MediumJong)
+    # Print seating and round info once
     try:
-        while not game.is_game_over():
-            game.play_turn()
-    except Exception as e:
-        lines.append(f"Exception during play: {e}")
+        seat_str = ', '.join(["East: P0", "South: P1", "West: P2", "North: P3"])
+        dora_str = ','.join(str(t) for t in getattr(game, 'dora_indicators', [])) if hasattr(game, 'dora_indicators') else 'N/A'
+        lines.append(f"Round {game.round_wind.name} | {seat_str} | Dora[{dora_str}]")
+    except Exception:
+        pass
+    # Run until game over (single round in MediumJong)
+    while not game.is_game_over():
+        game.play_turn()
 
     # Outcome
     if game.is_game_over():

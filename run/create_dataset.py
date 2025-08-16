@@ -64,7 +64,7 @@ def build_ac_dataset(
     gamma: float = 0.99,
     use_heuristic: bool = False,
     model_path: str | None = None,
-):
+) -> dict:
     if seed is not None:
         import random
         random.seed(seed)
@@ -216,6 +216,7 @@ def main():
     )
 
     print(f"Saved AC dataset to {out_path}")
+    return out_path
 
 
 if __name__ == '__main__':

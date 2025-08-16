@@ -23,6 +23,8 @@ from medium_core.constants import (
     SANSOKU_OPEN_HAN,
     SANSOKU_CLOSED_HAN,
     IIPEIKOU_HAN,
+    ITTSU_OPEN_HAN,
+    ITTSU_CLOSED_HAN,
 )
 
 
@@ -73,7 +75,7 @@ class Tile:
         if self.suit == Suit.HONORS:
             mapping = {
                 Honor.EAST: 'E', Honor.SOUTH: 'S', Honor.WEST: 'W', Honor.NORTH: 'N',
-                Honor.WHITE: 'P', Honor.GREEN: 'F', Honor.RED: 'C',
+                Honor.WHITE: 'Wh', Honor.GREEN: 'G', Honor.RED: 'R',
             }
             return mapping[self.tile_type]  # type: ignore[index]
         return f"{int(self.tile_type.value)}{self.suit.value}"
@@ -230,6 +232,32 @@ def _can_form_standard_hand(tiles: List[Tile]) -> bool:
     return False
 
 
+def _can_complete_standard_with_calls(concealed_tiles: List[Tile], called_sets: List[CalledSet]) -> bool:
+    """Return True if the player's hand can form a standard hand (4 melds + 1 pair)
+    considering that some melds may already be completed via called sets.
+
+    This function validates that the concealed tiles can be arranged into the
+    remaining required melds plus a single pair.
+    """
+    total_tiles = len(concealed_tiles) + sum(len(cs.tiles) for cs in called_sets)
+    if total_tiles != 14:
+        return False
+    # Count how many called melds are already completed (all call types represent melds)
+    called_melds = len(called_sets)
+    if called_melds > 4:
+        return False
+    needed_melds_from_concealed = 4 - called_melds
+    # After taking out one pair, the number of tiles left in concealed must be 3 * needed_melds_from_concealed
+    tiles = sorted(list(concealed_tiles), key=_tile_sort_key)
+    for idx in range(len(tiles) - 1):
+        a, b = tiles[idx], tiles[idx + 1]
+        if a.suit == b.suit and a.tile_type == b.tile_type:
+            remaining = tiles[:idx] + tiles[idx+2:]
+            if len(remaining) == 3 * needed_melds_from_concealed and _can_form_melds_concealed(remaining, needed_melds_from_concealed):
+                return True
+    return needed_melds_from_concealed == 0 and len(concealed_tiles) == 2 and concealed_tiles[0].suit == concealed_tiles[1].suit and concealed_tiles[0].tile_type == concealed_tiles[1].tile_type
+
+
 def _decompose_standard_with_pred(tiles: List[Tile], pred_meld, pred_pair) -> bool:
     """Try to decompose into 4 melds + 1 pair satisfying predicates.
 
@@ -371,6 +399,24 @@ def _has_iipeikou(concealed_tiles: List[Tile]) -> bool:
         for v in range(1, 8):
             if c[v] >= 2 and c[v+1] >= 2 and c[v+2] >= 2:
                 return True
+    return False
+
+def _has_ittsu(all_tiles: List[Tile]) -> bool:
+    """Pure straight: 1-9 straight within a single suit (1-2-3, 4-5-6, 7-8-9).
+    We detect presence of at least one of each segment in the same suit.
+    """
+    suit_vals = {
+        Suit.MANZU: [0] * 10,
+        Suit.PINZU: [0] * 10,
+        Suit.SOUZU: [0] * 10,
+    }
+    for t in all_tiles:
+        if t.suit in suit_vals:
+            suit_vals[t.suit][int(t.tile_type.value)] += 1
+    for s in (Suit.MANZU, Suit.PINZU, Suit.SOUZU):
+        c = suit_vals[s]
+        if all(c[v] >= 1 for v in (1,2,3)) and all(c[v] >= 1 for v in (4,5,6)) and all(c[v] >= 1 for v in (7,8,9)):
+            return True
     return False
 
 def _is_chi_possible_with(hand: List[Tile], target: Tile) -> List[List[Tile]]:
@@ -558,8 +604,12 @@ def _score_fu_and_han(concealed_tiles: List[Tile], called_sets: List[CalledSet],
         if _count_sanankou(concealed_tiles, called_sets) >= 3:
             han += SANANKOU_HAN
         # Sanshoku doujun
+        # Sanshoku doujun: counts for both closed and open hands
         if _has_sanshoku_sequences(all_tiles):
             han += SANSOKU_OPEN_HAN if open_hand else SANSOKU_CLOSED_HAN
+        # Ittsu (pure straight): open/closed
+        if _has_ittsu(all_tiles):
+            han += ITTSU_OPEN_HAN if open_hand else ITTSU_CLOSED_HAN
         # Iipeikou (closed only)
         if not open_hand and _has_iipeikou(concealed_tiles):
             han += IIPEIKOU_HAN
@@ -705,8 +755,8 @@ class GamePerspective:
         ok = False
         if _is_chiitoi(ct, cs):
             ok = True
-        # For standard hand, require exactly 14 tiles
-        if len(ct) == 14 and _can_form_standard_hand(ct):
+        # For standard hand, consider called sets when checking completeness
+        if _can_complete_standard_with_calls(ct, cs):
             ok = True
         if not ok:
             return False
@@ -728,6 +778,9 @@ class GamePerspective:
         # Sanshoku sequences available open/closed contribute yaku to win condition
         if _has_sanshoku_sequences(all_tiles):
             return True
+        # Ittsu contributes yaku for win
+        if _has_ittsu(all_tiles):
+            return True
         if _yakuhai_han(ct, cs, self.seat_winds[self.player_id], self.round_wind) > 0:
             return True
         # Pinfu (closed only) counts as yaku for win condition
@@ -735,8 +788,8 @@ class GamePerspective:
             return True
         if _is_chiitoi(ct, cs):
             return True
-        # Menzen tsumo: closed hand wins on self draw satisfies yaku requirement
-        if (not include_last_discard) and (self.newly_drawn_tile is not None) and (len(cs) == 0):
+        # Menzen tsumo: self-draw with no open-hand calls satisfies yaku requirement
+        if (not include_last_discard) and (self.newly_drawn_tile is not None) and (not _is_open_hand(cs)):
             return True
         return False
 

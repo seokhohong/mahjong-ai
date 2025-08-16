@@ -35,5 +35,7 @@ SANANKOU_HAN: int = 2
 SANSOKU_OPEN_HAN: int = 1  # Sanshoku doujun
 SANSOKU_CLOSED_HAN: int = 2
 IIPEIKOU_HAN: int = 1      # Closed-only
+ITTSU_OPEN_HAN: int = 1    # Pure straight (ittsu)
+ITTSU_CLOSED_HAN: int = 2
 
 

@@ -168,7 +168,7 @@ def train_ppo(
     init_model: str | None = None,
     warm_up_acc: float = 0.0,
     warm_up_max_epochs: int = 50,
-):
+) -> str:
     dev = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
     # Initialize AC network first so we can use its feature extraction table for preprocessing
     net = ACNetwork(hidden_size=128, embedding_dim=4, max_turns=50, temperature=1.0)
@@ -199,13 +199,39 @@ def train_ppo(
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
+    # Helper: compute top-1 policy accuracy on a given dataloader
+    def _eval_policy_accuracy(dloader: DataLoader) -> float:
+        model.eval()
+        correct = 0
+        count = 0
+        with torch.no_grad():
+            for batch in dloader:
+                (
+                    hand, calls, disc, gsv,
+                    flat_idx,
+                    _old_log_probs,
+                    _advantages,
+                    _returns,
+                ) = _prepare_batch_tensors(batch, dev)
+                pp, _ = model(hand.float(), calls.float(), disc.float(), gsv.float())
+                pred = torch.argmax(pp, dim=1)
+                correct += int((pred == flat_idx).sum().item())
+                count += int(gsv.size(0))
+        model.train()
+        return float(correct) / float(max(1, count))
+
     # Optional warm-up: behavior cloning on flat action index + value regression until accuracy threshold
     if warm_up_acc and warm_up_acc > 0.0:
         threshold = float(max(0.0, min(1.0, warm_up_acc)))
-        print(f"Starting warm-up until accuracy >= {threshold:.2f} (behavior cloning + value regression)...")
+        # Pre-check: if current model already meets threshold on validation (or train) accuracy, skip warm-up
+        initial_acc = _eval_policy_accuracy(dl_val if dl_val is not None else dl)
+        if initial_acc >= threshold:
+            print(f"Skipping warm-up: initial accuracy {initial_acc:.4f} >= {threshold:.4f}")
+        else:
+            print(f"Starting warm-up until accuracy >= {threshold:.2f} (behavior cloning + value regression)...")
         epoch = 0
         reached = False
-        while epoch < int(max(1, warm_up_max_epochs)) and not reached:
+        while initial_acc < threshold and epoch < int(max(1, warm_up_max_epochs)) and not reached:
             total_loss = 0.0
             total_examples = 0
             pol_loss_acc = 0.0
@@ -295,6 +321,7 @@ def train_ppo(
             if epoch_acc >= threshold:
                 reached = True
                 print(f"Warm-up threshold met: accuracy {epoch_acc:.4f} >= {threshold:.4f}. Switching to PPO.")
+            initial_acc = epoch_acc
             epoch += 1
 
     best_loss = math.inf
@@ -404,6 +431,7 @@ def train_ppo(
     final_path = os.path.join(out_dir, f'ac_ppo_{timestamp}.pt')
     torch.save(model.state_dict(), final_path)
     print(f"Saved PPO model to {final_path}")
+    return final_path
 
 
 def main():

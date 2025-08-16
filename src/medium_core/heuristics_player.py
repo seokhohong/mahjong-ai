@@ -105,7 +105,7 @@ class MediumHeuristicsPlayer(Player):
                     0 if is_lone_honor(t) else 1,
                     neighbor_count(t),
                     1 if t.suit == Suit.HONORS else 0,
-                    int(t.tile_type.value) if t.suit != Suit.HONORS else int(t.tile_type.value.value),
+                    int(t.tile_type.value) if t.suit != Suit.HONORS else int(t.tile_type.value),
                 )
 
             discards.sort(key=discard_key)
