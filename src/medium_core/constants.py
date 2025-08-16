@@ -7,6 +7,7 @@ DEALER_ID_START: int = 0
 # Tiles
 TILE_COPIES_DEFAULT: int = 4
 STARTING_HAND_TILES: int = 13
+DEAD_WALL_TILES: int = 14  # Riichi dead wall contains 14 tiles
 
 # Dora/Uradora
 INITIAL_DORA_INDICATORS: int = 1
@@ -31,5 +32,8 @@ CHANTA_CLOSED_HAN: int = 2
 JUNCHAN_OPEN_HAN: int = 2
 JUNCHAN_CLOSED_HAN: int = 3
 SANANKOU_HAN: int = 2
+SANSOKU_OPEN_HAN: int = 1  # Sanshoku doujun
+SANSOKU_CLOSED_HAN: int = 2
+IIPEIKOU_HAN: int = 1      # Closed-only
 
 

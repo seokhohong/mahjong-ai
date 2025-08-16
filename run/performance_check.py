@@ -44,8 +44,15 @@ def _stack_indexed_states(states: List[dict]) -> Tuple[np.ndarray, np.ndarray, n
     return hands, discs, called, gss
 
 
-def evaluate_performance(model_path: str, dataset_path: str, batch_size: int = 512) -> dict:
+def evaluate_performance(model_path: str, dataset_path: str, batch_size: int = 512, samples: int | None = None) -> dict:
     states, y_flat, rewards, legal_masks = _load_dataset(dataset_path)
+    # Optional sub-sampling: take the first N samples consistently across arrays
+    if samples is not None and samples > 0:
+        n = int(min(samples, len(states)))
+        states = states[:n]
+        y_flat = y_flat[:n]
+        rewards = rewards[:n]
+        legal_masks = legal_masks[:n]
     labels = np.argmax(y_flat, axis=1).astype(np.int64)
     hands, discs, called, gss = _stack_indexed_states(states)
 
@@ -114,6 +121,7 @@ def main() -> None:
                         help='Path to model .pt file (can be passed multiple times for side-by-side)')
     parser.add_argument('--dataset', '-d', required=True, help='Path to dataset .npz file')
     parser.add_argument('--batch-size', type=int, default=512, help='Inference batch size')
+    parser.add_argument('--samples', type=int, default=None, help='Use only the first N samples from the dataset')
     args = parser.parse_args()
 
     # Support comma-separated list in a single --model
@@ -125,7 +133,7 @@ def main() -> None:
 
     results = []
     for mp in model_paths:
-        res = evaluate_performance(mp, args.dataset, batch_size=int(args.batch_size))
+        res = evaluate_performance(mp, args.dataset, batch_size=int(args.batch_size), samples=(int(args.samples) if args.samples is not None else None))
         results.append(res)
 
     # Pretty print concise comparison

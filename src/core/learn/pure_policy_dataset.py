@@ -86,20 +86,29 @@ def serialize_state(state: GamePerspective) -> Dict[str, Any]:
 
 
 def serialize_action(action: Any) -> Dict[str, Any]:
-    if isinstance(action, Tsumo):
+    """Serialize an action object to a dict, robust to module duplication.
+
+    Some environments may import `core.game` under different module names (e.g.,
+    `core.game` and `src.core.game`), which breaks `isinstance` checks due to
+    distinct class identities. To avoid this, we branch on class name.
+    """
+    cls = type(action).__name__
+    if cls == 'Tsumo':
         return {'type': 'tsumo'}
-    if isinstance(action, Ron):
+    if cls == 'Ron':
         return {'type': 'ron'}
-    if isinstance(action, Discard):
-        return {'type': 'discard', 'tile': _tile_str(action.tile)}
-    if isinstance(action, Pon):
-        return {'type': 'pon', 'tiles': [_tile_str(t) for t in action.tiles]}
-    if isinstance(action, Chi):
-        return {'type': 'chi', 'tiles': [_tile_str(t) for t in action.tiles]}
-    if isinstance(action, PassCall):
+    if cls == 'Discard':
+        tile = getattr(action, 'tile', None)
+        return {'type': 'discard', 'tile': _tile_str(tile)}
+    if cls == 'Pon':
+        tiles = getattr(action, 'tiles', [])
+        return {'type': 'pon', 'tiles': [_tile_str(t) for t in tiles]}
+    if cls == 'Chi':
+        tiles = getattr(action, 'tiles', [])
+        return {'type': 'chi', 'tiles': [_tile_str(t) for t in tiles]}
+    if cls == 'PassCall':
         return {'type': 'pass'}
-    # Unknown fallback
-    return {'type': 'unknown'}
+    raise SimpleJong.IllegalMoveException(f"Trying to serialize an invalid action {action}")
 
 
 def _assign_rewards(num_players: int, winners: List[int], loser: Optional[int]) -> List[float]:

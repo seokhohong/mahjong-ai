@@ -522,6 +522,61 @@ class TestSimpleJong(unittest.TestCase):
                 losers += 1
         self.assertGreaterEqual(losers, 1, f"Expected at least one Ron loser across 20 games (seed={seed})")
 
+    def test_game_ends_immediately_on_tsumo(self):
+        """If a player can tsumo, the round should end without any further discards."""
+        game = SimpleJong([Player(0), Player(1), Player(2), Player(3)])
+        # Prepare hand so that after drawing a specific tile, player 0 has exactly 12 tiles
+        # that form four melds. Start with 11 tiles and draw the 12th as the first draw.
+        twelve_meld_tiles = [
+            Tile(Suit.PINZU, TileType.ONE), Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.THREE),
+            Tile(Suit.PINZU, TileType.FOUR), Tile(Suit.PINZU, TileType.FIVE), Tile(Suit.PINZU, TileType.SIX),
+            Tile(Suit.PINZU, TileType.SEVEN), Tile(Suit.PINZU, TileType.EIGHT), Tile(Suit.PINZU, TileType.NINE),
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+        ]
+        # Remove one tile to start with 11; choose to draw back the removed tile
+        starting_hand = twelve_meld_tiles[:-1]
+        draw_tile = twelve_meld_tiles[-1]
+        game._player_hands[0] = starting_hand.copy()
+        game.current_player_idx = 0
+        # Provide the missing tile as the next draw so hand becomes 12-meld set
+        game.tiles = [draw_tile]
+        game.play_round()
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(game.get_winners(), [0])
+        # No player should have discarded since tsumo ends the round immediately
+        total_discards = sum(len(game.player_discards[i]) for i in range(4))
+        self.assertEqual(total_discards, 0)
+
+    def test_game_ends_immediately_on_ron(self):
+        """On Ron, the round ends after the triggering discard and reactions; no further turn proceeds."""
+        class DiscardThreeP(Player):
+            def play(self, game_state: GamePerspective):
+                t = Tile(Suit.PINZU, TileType.THREE)
+                if t in game_state.player_hand:
+                    return Discard(t)
+                return super().play(game_state)
+
+        players = [DiscardThreeP(0), Player(1), Player(2), Player(3)]
+        game = SimpleJong(players)
+        # Player 0 discards 3p; player 1 can ron; prevent further draws
+        base_s = [
+            Tile(Suit.SOUZU, TileType.ONE), Tile(Suit.SOUZU, TileType.TWO), Tile(Suit.SOUZU, TileType.THREE),
+            Tile(Suit.SOUZU, TileType.FOUR), Tile(Suit.SOUZU, TileType.FIVE), Tile(Suit.SOUZU, TileType.SIX),
+            Tile(Suit.SOUZU, TileType.SEVEN), Tile(Suit.SOUZU, TileType.EIGHT), Tile(Suit.SOUZU, TileType.NINE),
+        ]
+        game._player_hands[0] = [Tile(Suit.PINZU, TileType.THREE)] + [Tile(Suit.SOUZU, TileType.ONE)] * 10
+        game._player_hands[1] = base_s + [Tile(Suit.PINZU, TileType.TWO), Tile(Suit.PINZU, TileType.FOUR)]
+        game._player_hands[2] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game._player_hands[3] = [Tile(Suit.SOUZU, TileType.ONE)] * 11
+        game.tiles = []
+        game.current_player_idx = 0
+        game.play_round()
+        self.assertTrue(game.is_game_over())
+        self.assertEqual(set(game.get_winners()), {1})
+        # Exactly one discard should have happened (the triggering discard); no further continuation
+        total_discards = sum(len(game.player_discards[i]) for i in range(4))
+        self.assertEqual(total_discards, 1)
+
 if __name__ == "__main__":
     # Run the tests
     unittest.main(verbosity=2)

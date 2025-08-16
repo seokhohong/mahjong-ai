@@ -229,6 +229,26 @@ class GamePerspective:
         self.player_discards: Dict[int, List[str]] = dict(player_discards) if player_discards is not None else {}
         self.visible_tiles: List[str] = list(visible_tiles) if visible_tiles is not None else []
 
+    def __str__(self) -> str:
+        """Readable snapshot: hand (including newly drawn), called sets, and last discard."""
+        hand_str = " ".join(str(t) for t in self.player_hand)
+        if self.newly_drawn_tile is not None and self.newly_drawn_tile not in self.player_hand:
+            # Show newly drawn tile separately if not already in sorted hand list
+            hand_repr = f"[{hand_str}] +{str(self.newly_drawn_tile)}"
+        else:
+            hand_repr = f"[{hand_str}]"
+        # Called sets for this player
+        my_called = self.called_sets.get(self.player_id, [])
+        if my_called:
+            called_parts = [f"{cs.call_type}(" + " ".join(str(t) for t in cs.tiles) + ")" for cs in my_called]
+            called_repr = "[" + ", ".join(called_parts) + "]"
+        else:
+            called_repr = "[]"
+        last_disc = str(self.last_discarded_tile) if self.last_discarded_tile is not None else "-"
+        return f"P{self.player_id} Hand {hand_repr} | Called {called_repr} | Last discard: {last_disc}"
+
+    __repr__ = __str__
+
     def can_tsumo(self) -> bool:
         """Return True if player's hand including the newly drawn tile completes remaining melds.
 
@@ -702,6 +722,14 @@ class SimpleJong:
             self.game_over = True
         # End game if wall empty and no pending discard
         if not self.tiles and self.last_discarded_tile is None:
+            # Draw: assign winners as all players in tenpai (keiten-like), others are non-winners
+            tenpai_winners: List[int] = []
+            for pid in range(4):
+                if self._is_tenpai_hand(pid):
+                    tenpai_winners.append(pid)
+            self.winners = tenpai_winners
+            # No single "loser" on draw in this simplified API
+            self.loser = None
             self.game_over = True
 
     def _draw_for_current_if_needed(self) -> None:
@@ -896,6 +924,46 @@ class SimpleJong:
 
         # Should not be reachable
         raise SimpleJong.IllegalMoveException("Unsupported move type")
+
+    # --- Tenpai detection (keiten-like) for draw resolution ---
+    def _is_tenpai_hand(self, player_id: int) -> bool:
+        """Return True if the player's concealed tiles are one tile away from completing
+        the required number of melds, considering current called sets.
+
+        Heuristic definition compatible with our simplified engine:
+        - If hand has 11 tiles: if adding any tile (1-9 in both suits) makes it possible
+          to partition into the remaining melds, it's tenpai.
+        - If hand has 12 tiles: if removing any single tile yields an 11-tile hand that
+          is tenpai per the rule above.
+        """
+        hand = list(self._player_hands[player_id])
+        num_called = len(self._player_called_sets.get(player_id, []))
+        remaining_melds = max(0, 4 - num_called)
+        if remaining_melds == 0:
+            return False
+
+        def completes_with_added(one_more: Tile) -> bool:
+            tiles = hand + [one_more]
+            return _can_form_melds(tiles, remaining_melds)
+
+        # Generate candidate tiles (Pinzu/Souzu, 1..9)
+        candidates: List[Tile] = [Tile(s, t) for s in (Suit.PINZU, Suit.SOUZU) for t in TileType]
+
+        if len(hand) == 11:
+            for cand in candidates:
+                if completes_with_added(cand):
+                    return True
+            return False
+        if len(hand) == 12:
+            # Try discarding each tile and then see if adding one tile can complete
+            for i in range(len(hand)):
+                reduced = hand[:i] + hand[i+1:]
+                for cand in candidates:
+                    if _can_form_melds(reduced + [cand], remaining_melds):
+                        return True
+            return False
+        # Fallback: other sizes not expected in this engine
+        return False
 
     def get_call_options(self, reaction_state: GamePerspective) -> Dict[str, List[List[Tile]]]:
         """Wrapper retained for backward compatibility; delegates to GamePerspective."""
